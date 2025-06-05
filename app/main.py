@@ -7,6 +7,7 @@ from app.api.v1 import api_v1_router
 from app.core.settings import settings
 from app.core.database import init_db, close_db
 from app.core.redis_client import _redis_conversation_state as redis_conversation_state
+from app.services import _message_handler
 # from app.services.job_processor import job_processor
 
 # Setup structured logging
@@ -46,6 +47,12 @@ async def lifespan(app: FastAPI):
         await init_db()
         logger.info("✅ Database initialized successfully")
 
+        # Initialize MessageHandler and start background processing
+        logger.info("🤖 Initializing MessageHandler...")
+        await _message_handler.initialize()
+        await _message_handler.start_background_processing()
+        logger.info("✅ MessageHandler background processing started")
+
         # Initialize job processor
         logger.info("🎉 Initializing job processor...")
         # await job_processor.start()
@@ -65,6 +72,12 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Shutting down Enhanced Chat Bot Backend...")
 
     try:
+        # Stop MessageHandler background processing
+        logger.info("🤖 Stopping MessageHandler background processing...")
+        await _message_handler.stop_background_processing()
+        await _message_handler.close()
+        logger.info("✅ MessageHandler stopped")
+
         # Close Redis connection
         logger.info("📡 Disconnecting from Redis...")
         await redis_conversation_state.disconnect()

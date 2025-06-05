@@ -12,6 +12,8 @@ class Conversation(Base):
 
     __tablename__ = "conversations"
 
+    # Conversation identification
+    conversation_id = Column(String(255), nullable=False, unique=True)
     # Basic conversation info
     bot_id = Column(UUID(as_uuid=True), ForeignKey("bots.id"), nullable=False)
     status = Column(String(50), default="active", nullable=False)  # active, ended, transferred, paused

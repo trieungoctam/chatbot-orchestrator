@@ -22,7 +22,7 @@ Author: Generated for Chatbot System Microservice Architecture
 
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete, and_, func
+from sqlalchemy import select, update, delete, and_, func, or_
 from sqlalchemy.orm import selectinload, joinedload
 import uuid
 import structlog
@@ -33,7 +33,7 @@ from app.schemas.request import (
     CreatePlatformActionRequest, UpdatePlatformActionRequest
 )
 from app.schemas.response import (
-    PlatformResponse, CreatePlatformResponse, UpdatePlatformResponse, PlatformListResponse,
+    PlatformResponse, CreatePlatformResponse, UpdatePlatformResponse, PlatformListResponse, PlatformAction,
     PlatformActionResponse, CreatePlatformActionResponse, UpdatePlatformActionResponse, PlatformActionListResponse
 )
 
@@ -71,6 +71,24 @@ class PlatformCRUD:
         Returns:
             PlatformResponse: Converted response schema
         """
+        # Convert actions if they are loaded - but don't try to access them if not loaded
+        actions_response = []
+        # Check if actions were eagerly loaded to avoid lazy loading issues
+        if hasattr(platform, 'actions') and platform.actions is not None:
+            for action in platform.actions:
+                action_response = PlatformAction(
+                    id=str(action.id),
+                    platform_id=str(action.platform_id),
+                    platform_name=platform.name,  # Use the current platform's name
+                    name=action.name,
+                    description=action.description,
+                    method=action.method,
+                    path=action.path,
+                    is_active=action.is_active,
+                    meta_data=action.meta_data or {},
+                )
+                actions_response.append(action_response)
+
         return PlatformResponse(
             id=str(platform.id),
             name=platform.name,
@@ -82,7 +100,8 @@ class PlatformCRUD:
             is_active=platform.is_active,
             meta_data=platform.meta_data or {},
             created_at=platform.created_at.isoformat() if platform.created_at else None,
-            updated_at=platform.updated_at.isoformat() if platform.updated_at else None
+            updated_at=platform.updated_at.isoformat() if platform.updated_at else None,
+            actions=actions_response
         )
 
     async def create(self, platform_data: CreatePlatformRequest) -> CreatePlatformResponse:
@@ -131,7 +150,7 @@ class PlatformCRUD:
             Optional[PlatformResponse]: Platform response if found, None otherwise
         """
         try:
-            stmt = select(Platform).where(Platform.id == platform_id)
+            stmt = select(Platform).options(selectinload(Platform.actions)).where(Platform.id == platform_id)
             result = await self.db.execute(stmt)
             platform = result.scalar_one_or_none()
 
@@ -140,6 +159,21 @@ class PlatformCRUD:
             return None
         except Exception as e:
             logger.error("Error getting Platform by ID", platform_id=str(platform_id), error=str(e))
+            raise
+
+    async def get_by_id_with_actions(self, platform_id: uuid.UUID) -> Optional[PlatformResponse]:
+        """
+        Get Platform by ID with eager loading of related data.
+        """
+        try:
+            stmt = select(Platform).where(Platform.id == platform_id).options(selectinload(Platform.actions))
+            result = await self.db.execute(stmt)
+            platform = result.scalar_one_or_none()
+            if platform:
+                return self._to_response(platform)
+            return None
+        except Exception as e:
+            logger.error("Error getting Platform by ID with actions", platform_id=str(platform_id), error=str(e))
             raise
 
     async def get_by_name(self, name: str) -> Optional[PlatformResponse]:
@@ -153,7 +187,7 @@ class PlatformCRUD:
             Optional[PlatformResponse]: Platform response if found, None otherwise
         """
         try:
-            stmt = select(Platform).where(Platform.name == name)
+            stmt = select(Platform).options(selectinload(Platform.actions)).where(Platform.name == name)
             result = await self.db.execute(stmt)
             platform = result.scalar_one_or_none()
 
@@ -178,6 +212,7 @@ class PlatformCRUD:
         try:
             stmt = (
                 select(Platform)
+                .options(selectinload(Platform.actions))
                 .order_by(Platform.created_at.desc())
                 .offset(skip)
                 .limit(limit)
@@ -215,6 +250,7 @@ class PlatformCRUD:
         try:
             stmt = (
                 select(Platform)
+                .options(selectinload(Platform.actions))
                 .where(Platform.is_active == True)
                 .order_by(Platform.created_at.desc())
                 .offset(skip)

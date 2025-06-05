@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Healthcare AI Assistant - Admin Panel</title>
+    <link rel="stylesheet" href="admin-styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="admin-container">
+        <!-- Sidebar Navigation -->
+        <nav class="admin-sidebar">
+            <div class="admin-header">
+                <div class="admin-logo">
+                    <i class="fas fa-shield-alt"></i>
+                    <h1>Admin Panel</h1>
+                </div>
+                <button class="sidebar-toggle" id="sidebarToggle">
+                    <i class="fas fa-bars"></i>
+                </button>
+            </div>
+
+            <div class="nav-menu">
+                <div class="nav-section">
+                    <h3>Overview</h3>
+                    <a href="#dashboard" class="nav-item active" data-section="dashboard">
+                        <i class="fas fa-tachometer-alt"></i>
+                        <span>Dashboard</span>
+                    </a>
+                </div>
+
+                <div class="nav-section">
+                    <h3>Management</h3>
+                    <a href="#bots" class="nav-item" data-section="bots">
+                        <i class="fas fa-robot"></i>
+                        <span>Bot Management</span>
+                    </a>
+                    <a href="#conversations" class="nav-item" data-section="conversations">
+                        <i class="fas fa-comments"></i>
+                        <span>Conversations</span>
+                    </a>
+                    <a href="#core-ai" class="nav-item" data-section="core-ai">
+                        <i class="fas fa-users"></i>
+                        <span>Core AI</span>
+                    </a>
+                    <a href="#platforms" class="nav-item" data-section="platforms">
+                        <i class="fas fa-server"></i>
+                        <span>Platforms</span>
+                    </a>
+                </div>
+
+                <div class="nav-section">
+                    <h3>System</h3>
+                    <a href="#monitoring" class="nav-item" data-section="monitoring">
+                        <i class="fas fa-chart-line"></i>
+                        <span>Monitoring</span>
+                    </a>
+                    <a href="#settings" class="nav-item" data-section="settings">
+                        <i class="fas fa-cog"></i>
+                        <span>Settings</span>
+                    </a>
+                    <a href="#logs" class="nav-item" data-section="logs">
+                        <i class="fas fa-file-alt"></i>
+                        <span>System Logs</span>
+                    </a>
+                </div>
+            </div>
+
+            <div class="nav-footer">
+                <button class="btn-secondary" id="backToChatBtn">
+                    <i class="fas fa-arrow-left"></i>
+                    Back to Chat
+                </button>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="admin-main">
+            <!-- Top Bar -->
+            <header class="admin-topbar">
+                <div class="topbar-left">
+                    <h2 id="sectionTitle">Dashboard</h2>
+                </div>
+                <div class="topbar-right">
+                    <div class="system-status" id="systemStatus">
+                        <span class="status-indicator online"></span>
+                        <span>System Online</span>
+                    </div>
+                    <div class="admin-user">
+                        <i class="fas fa-user-shield"></i>
+                        <span>Administrator</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Content Sections -->
+            <div class="admin-content">
+
+                <!-- Dashboard Section -->
+                <section id="dashboard" class="content-section active">
+                    <div class="section-header">
+                        <h3>System Overview</h3>
+                        <div class="section-actions">
+                            <button class="btn-primary" id="refreshDashboard">
+                                <i class="fas fa-sync-alt"></i>
+                                Refresh
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <!-- Key Metrics -->
+                        <div class="dashboard-card">
+                            <div class="card-header">
+                                <h4>System Metrics</h4>
+                                <i class="fas fa-chart-bar"></i>
+                            </div>
+                            <div class="metrics-grid">
+                                <div class="metric">
+                                    <div class="metric-value" id="totalConversations">0</div>
+                                    <div class="metric-label">Total Conversations</div>
+                                </div>
+                                <div class="metric">
+                                    <div class="metric-value" id="activeBots">0</div>
+                                    <div class="metric-label">Active Bots</div>
+                                </div>
+                                <div class="metric">
+                                    <div class="metric-value" id="dailyMessages">0</div>
+                                    <div class="metric-label">Messages Today</div>
+                                </div>
+                                <div class="metric">
+                                    <div class="metric-value" id="systemUptime">0h</div>
+                                    <div class="metric-label">System Uptime</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Performance Chart -->
+                        <div class="dashboard-card chart-card">
+                            <div class="card-header">
+                                <h4>Message Volume (24h)</h4>
+                                <div class="chart-controls">
+                                    <select id="chartTimeframe">
+                                        <option value="24h">Last 24 Hours</option>
+                                        <option value="7d">Last 7 Days</option>
+                                        <option value="30d">Last 30 Days</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="messageChart"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Recent Activity -->
+                        <div class="dashboard-card">
+                            <div class="card-header">
+                                <h4>Recent Activity</h4>
+                                <button class="btn-icon" id="refreshActivity">
+                                    <i class="fas fa-sync"></i>
+                                </button>
+                            </div>
+                            <div class="activity-list" id="activityList">
+                                <!-- Activity items will be populated here -->
+                            </div>
+                        </div>
+
+                        <!-- System Health -->
+                        <div class="dashboard-card">
+                            <div class="card-header">
+                                <h4>System Health</h4>
+                                <div class="health-indicator" id="healthIndicator">
+                                    <span class="health-status good">Good</span>
+                                </div>
+                            </div>
+                            <div class="health-metrics">
+                                <div class="health-item">
+                                    <span class="health-label">Redis Connection</span>
+                                    <span class="health-value good" id="redisStatus">Connected</span>
+                                </div>
+                                <div class="health-item">
+                                    <span class="health-label">Database</span>
+                                    <span class="health-value good" id="dbStatus">Connected</span>
+                                </div>
+                                <div class="health-item">
+                                    <span class="health-label">API Response Time</span>
+                                    <span class="health-value good" id="apiResponseTime">< 100ms</span>
+                                </div>
+                                <div class="health-item">
+                                    <span class="health-label">Memory Usage</span>
+                                    <span class="health-value good" id="memoryUsage">45%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Bot Management Section -->
+                <section id="bots" class="content-section">
+                    <div class="section-header">
+                        <h3>Bot Management</h3>
+                        <div class="section-actions">
+                            <button class="btn-primary" id="createBotBtn">
+                                <i class="fas fa-plus"></i>
+                                Create Bot
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Bot ID</th>
+                                    <th>Name</th>
+                                    <th>Core AI</th>
+                                    <th>Platform</th>
+                                    <th>Language</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="botsTableBody">
+                                <!-- Bot rows will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Conversations Section -->
+                <section id="conversations" class="content-section">
+                    <div class="section-header">
+                        <h3>Conversation Management</h3>
+                        <div class="section-filters">
+                            <input type="search" placeholder="Search conversations..." id="conversationSearch">
+                            <select id="conversationFilter">
+                                <option value="all">All Conversations</option>
+                                <option value="active">Active</option>
+                                <option value="completed">Completed</option>
+                                <option value="error">Error</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Conversation ID</th>
+                                    <th>Bot</th>
+                                    <th>Messages</th>
+                                    <th>Status</th>
+                                    <th>Started</th>
+                                    <th>Last Activity</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="conversationsTableBody">
+                                <!-- Conversation rows will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Core AI Section -->
+                <section id="core-ai" class="content-section">
+                    <div class="section-header">
+                        <h3>Core AI Management</h3>
+                        <div class="section-actions">
+                            <button class="btn-primary" id="createCoreAIBtn">
+                                <i class="fas fa-plus"></i>
+                                Create Core AI
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Core AI ID</th>
+                                    <th>Name</th>
+                                    <th>API Endpoint</th>
+                                    <th>Model Name</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="coreAIsTableBody">
+                                <!-- Core AI rows will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Platforms Section -->
+                <section id="platforms" class="content-section">
+                    <div class="section-header">
+                        <h3>Platform Management</h3>
+                        <div class="section-actions">
+                            <button class="btn-primary" id="createPlatformBtn">
+                                <i class="fas fa-plus"></i>
+                                Create Platform
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Platform ID</th>
+                                    <th>Name</th>
+                                    <th>Base URL</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="platformsTableBody">
+                                <!-- Platform rows will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <!-- Monitoring Section -->
+                <section id="monitoring" class="content-section">
+                    <div class="section-header">
+                        <h3>System Monitoring</h3>
+                        <div class="section-actions">
+                            <button class="btn-secondary" id="exportMonitoringBtn">
+                                <i class="fas fa-download"></i>
+                                Export Report
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="monitoring-grid">
+                        <div class="monitoring-card">
+                            <h4>Performance Metrics</h4>
+                            <div class="metric-chart">
+                                <canvas id="performanceChart"></canvas>
+                            </div>
+                        </div>
+
+                        <div class="monitoring-card">
+                            <h4>Error Rates</h4>
+                            <div class="metric-chart">
+                                <canvas id="errorChart"></canvas>
+                            </div>
+                        </div>
+
+                        <div class="monitoring-card">
+                            <h4>Resource Usage</h4>
+                            <div class="resource-meters">
+                                <div class="resource-meter">
+                                    <label>CPU Usage</label>
+                                    <div class="meter">
+                                        <div class="meter-fill" style="width: 35%"></div>
+                                    </div>
+                                    <span>35%</span>
+                                </div>
+                                <div class="resource-meter">
+                                    <label>Memory Usage</label>
+                                    <div class="meter">
+                                        <div class="meter-fill" style="width: 45%"></div>
+                                    </div>
+                                    <span>45%</span>
+                                </div>
+                                <div class="resource-meter">
+                                    <label>Disk Usage</label>
+                                    <div class="meter">
+                                        <div class="meter-fill" style="width: 20%"></div>
+                                    </div>
+                                    <span>20%</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="monitoring-card">
+                            <h4>Active Connections</h4>
+                            <div class="connection-stats">
+                                <div class="stat">
+                                    <span class="stat-label">WebSocket Connections</span>
+                                    <span class="stat-value">24</span>
+                                </div>
+                                <div class="stat">
+                                    <span class="stat-label">Database Connections</span>
+                                    <span class="stat-value">8</span>
+                                </div>
+                                <div class="stat">
+                                    <span class="stat-label">Redis Connections</span>
+                                    <span class="stat-value">5</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Settings Section -->
+                <section id="settings" class="content-section">
+                    <div class="section-header">
+                        <h3>System Settings</h3>
+                        <div class="section-actions">
+                            <button class="btn-primary" id="saveSettingsBtn">
+                                <i class="fas fa-save"></i>
+                                Save Settings
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="settings-grid">
+                        <div class="settings-card">
+                            <h4>API Configuration</h4>
+                            <div class="form-group">
+                                <label for="apiPort">API Port</label>
+                                <input type="number" id="apiPort" value="8000">
+                            </div>
+                            <div class="form-group">
+                                <label for="apiHost">API Host</label>
+                                <input type="text" id="apiHost" value="localhost">
+                            </div>
+                            <div class="form-group">
+                                <label for="corsOrigins">CORS Origins</label>
+                                <textarea id="corsOrigins" rows="3">http://localhost:3000,http://localhost:8080</textarea>
+                            </div>
+                        </div>
+
+                        <div class="settings-card">
+                            <h4>Database Settings</h4>
+                            <div class="form-group">
+                                <label for="dbHost">Database Host</label>
+                                <input type="text" id="dbHost" value="localhost">
+                            </div>
+                            <div class="form-group">
+                                <label for="dbPort">Database Port</label>
+                                <input type="number" id="dbPort" value="5432">
+                            </div>
+                            <div class="form-group">
+                                <label for="dbName">Database Name</label>
+                                <input type="text" id="dbName" value="healthcare_chat">
+                            </div>
+                        </div>
+
+                        <div class="settings-card">
+                            <h4>Redis Configuration</h4>
+                            <div class="form-group">
+                                <label for="redisHost">Redis Host</label>
+                                <input type="text" id="redisHost" value="localhost">
+                            </div>
+                            <div class="form-group">
+                                <label for="redisPort">Redis Port</label>
+                                <input type="number" id="redisPort" value="6379">
+                            </div>
+                            <div class="form-group">
+                                <label for="redisDb">Redis Database</label>
+                                <input type="number" id="redisDb" value="0">
+                            </div>
+                        </div>
+
+                        <div class="settings-card">
+                            <h4>Security Settings</h4>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="enableAuth" checked>
+                                    Enable Authentication
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="enableLogging" checked>
+                                    Enable Request Logging
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="enableRateLimit" checked>
+                                    Enable Rate Limiting
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Logs Section -->
+                <section id="logs" class="content-section">
+                    <div class="section-header">
+                        <h3>System Logs</h3>
+                        <div class="section-actions">
+                            <select id="logLevel">
+                                <option value="all">All Levels</option>
+                                <option value="error">Error</option>
+                                <option value="warning">Warning</option>
+                                <option value="info">Info</option>
+                                <option value="debug">Debug</option>
+                            </select>
+                            <button class="btn-secondary" id="clearLogsBtn">
+                                <i class="fas fa-trash"></i>
+                                Clear Logs
+                            </button>
+                            <button class="btn-primary" id="refreshLogsBtn">
+                                <i class="fas fa-sync"></i>
+                                Refresh
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="logs-container">
+                        <div class="log-viewer" id="logViewer">
+                            <!-- Log entries will be populated here -->
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <!-- Modals -->
+        <div class="modal" id="createBotModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Create New Bot</h3>
+                    <button class="btn-close" id="closeBotModalBtn">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <form id="createBotForm">
+                        <div class="form-group">
+                            <label for="botName">Bot Name *</label>
+                            <input type="text" id="botName" name="botName" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="botDescription">Description</label>
+                            <textarea id="botDescription" name="botDescription" rows="3" placeholder="Enter bot description"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="botLanguage">Language *</label>
+                            <select id="botLanguage" name="botLanguage" required>
+                                <option value="vi">Vietnamese</option>
+                                <option value="en">English</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="botCoreAI">Core AI *</label>
+                            <select id="botCoreAI" name="botCoreAI" required>
+                                <option value="">Select Core AI...</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="botPlatform">Platform *</label>
+                            <select id="botPlatform" name="botPlatform" required>
+                                <option value="">Select Platform...</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="botPrompt">System Prompt</label>
+                            <textarea id="botPrompt" name="botPrompt" rows="5" placeholder="You are a helpful AI assistant.">You are a helpful AI assistant.</textarea>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-secondary" type="button" id="cancelBotBtn">Cancel</button>
+                    <button class="btn-primary" type="submit" form="createBotForm">Create Bot</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-spinner">
+                <div class="spinner"></div>
+                <p>Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="admin-app.js"></script>
+</body>
+</html>

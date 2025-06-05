@@ -126,5 +126,6 @@ class MessageRequest(BaseModel):
 
 class PancakeMessageRequest(BaseModel):
     conversation_id: Optional[str] = Field(default=None, description="Conversation ID - will be auto-generated if not provided")
+    bot_id: str = Field(..., description="Bot ID")
     history: str = Field(..., description="Conversation history string")
     resources: Optional[Dict[str, Any]] = Field(default=None, description="Additional context and resources")

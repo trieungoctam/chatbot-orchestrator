@@ -47,6 +47,7 @@ async def send_message(
         # Process the message with context chunking
         result = await message_handler.handle_message_request(
             conversation_id=request.conversation_id,
+            bot_id=request.bot_id,
             history=request.history,
             resources=request.resources,
         )

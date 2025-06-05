@@ -82,6 +82,7 @@ class BotListResponse(BaseModel):
 
 class ConversationResponse(BaseModel):
     id: str
+    conversation_id: str
     bot_id: str
     status: str
     context: Optional[Dict[str, Any]] = None
@@ -143,42 +144,6 @@ class MessageListResponse(BaseModel):
     error: Optional[str] = None
     data: Optional[List[MessageResponse]] = None
 
-# =============================== Platform ===============================
-
-class PlatformResponse(BaseModel):
-    id: str
-    name: str
-    description: str
-    base_url: str
-    rate_limit_per_minute: Optional[int] = None
-    auth_required: bool
-    auth_token: Optional[str] = None
-    is_active: bool
-    meta_data: Optional[Dict[str, Any]] = None
-    created_at: datetime
-    updated_at: datetime
-
-class CreatePlatformResponse(BaseModel):
-    success: bool
-    status: str
-    message: Optional[str] = None
-    error: Optional[str] = None
-    data: Optional[PlatformResponse] = None
-
-class UpdatePlatformResponse(BaseModel):
-    success: bool
-    status: str
-    message: Optional[str] = None
-    error: Optional[str] = None
-    data: Optional[PlatformResponse] = None
-
-class PlatformListResponse(BaseModel):
-    success: bool
-    status: str
-    message: Optional[str] = None
-    error: Optional[str] = None
-    data: Optional[List[PlatformResponse]] = None
-
 # =============================== Platform Action ===============================
 
 class PlatformActionResponse(BaseModel):
@@ -214,6 +179,54 @@ class PlatformActionListResponse(BaseModel):
     message: Optional[str] = None
     error: Optional[str] = None
     data: Optional[List[PlatformActionResponse]] = None
+
+# =============================== Platform ===============================
+
+class PlatformAction(BaseModel):
+    id: str
+    platform_id: str
+    platform_name: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    method: str
+    path: str
+    is_active: bool
+    meta_data: Optional[Dict[str, Any]] = None
+
+class PlatformResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    base_url: str
+    rate_limit_per_minute: Optional[int] = None
+    auth_required: bool
+    auth_token: Optional[str] = None
+    is_active: bool
+    meta_data: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: datetime
+    actions: Optional[List[PlatformAction]] = None
+
+class CreatePlatformResponse(BaseModel):
+    success: bool
+    status: str
+    message: Optional[str] = None
+    error: Optional[str] = None
+    data: Optional[PlatformResponse] = None
+
+class UpdatePlatformResponse(BaseModel):
+    success: bool
+    status: str
+    message: Optional[str] = None
+    error: Optional[str] = None
+    data: Optional[PlatformResponse] = None
+
+class PlatformListResponse(BaseModel):
+    success: bool
+    status: str
+    message: Optional[str] = None
+    error: Optional[str] = None
+    data: Optional[List[PlatformResponse]] = None
 
 # =============================== General ===============================
 

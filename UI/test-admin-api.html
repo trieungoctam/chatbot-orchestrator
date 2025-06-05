@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin API Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; color: #155724; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; color: #721c24; }
+        .loading { background-color: #fff3cd; border-color: #ffeaa7; color: #856404; }
+        button { padding: 10px 15px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        pre { background: #f8f9fa; padding: 10px; border-radius: 3px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>Admin API Integration Test</h1>
+
+    <div class="test-section">
+        <h3>1. Backend Health Check</h3>
+        <button onclick="testHealth()">Test Health Endpoint</button>
+        <div id="health-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>2. Bot Statistics</h3>
+        <button onclick="testBotStats()">Test Bot Stats API</button>
+        <div id="bot-stats-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>3. List Bots</h3>
+        <button onclick="testListBots()">Test List Bots API</button>
+        <div id="list-bots-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>4. Conversation Statistics</h3>
+        <button onclick="testConversationStats()">Test Conversation Stats API</button>
+        <div id="conversation-stats-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>5. List Conversations</h3>
+        <button onclick="testListConversations()">Test List Conversations API</button>
+        <div id="list-conversations-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>6. Core AI Statistics</h3>
+        <button onclick="testCoreAIStats()">Test Core AI Stats API</button>
+        <div id="core-ai-stats-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>7. Platform Statistics</h3>
+        <button onclick="testPlatformStats()">Test Platform Stats API</button>
+        <div id="platform-stats-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>8. List Platforms</h3>
+        <button onclick="testListPlatforms()">Test List Platforms API</button>
+        <div id="list-platforms-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>9. List Core AI</h3>
+        <button onclick="testListCoreAI()">Test List Core AI API</button>
+        <div id="list-core-ai-result"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+
+        async function apiCall(endpoint, method = 'GET', data = null) {
+            const url = `${API_BASE}${endpoint}`;
+            const options = {
+                method,
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            };
+
+            if (data) {
+                options.body = JSON.stringify(data);
+            }
+
+            try {
+                const response = await fetch(url, options);
+                const result = await response.json();
+                return { success: response.ok, data: result, status: response.status };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        }
+
+        function showResult(elementId, result) {
+            const element = document.getElementById(elementId);
+            element.innerHTML = '';
+
+            const resultDiv = document.createElement('div');
+            if (result.success) {
+                resultDiv.className = 'success';
+                resultDiv.innerHTML = `
+                    <strong>✅ Success!</strong>
+                    <pre>${JSON.stringify(result.data, null, 2)}</pre>
+                `;
+            } else {
+                resultDiv.className = 'error';
+                resultDiv.innerHTML = `
+                    <strong>❌ Error!</strong>
+                    <p>Status: ${result.status || 'Network Error'}</p>
+                    <pre>${result.error || JSON.stringify(result.data, null, 2)}</pre>
+                `;
+            }
+            element.appendChild(resultDiv);
+        }
+
+        function showLoading(elementId) {
+            const element = document.getElementById(elementId);
+            element.innerHTML = '<div class="loading">🔄 Loading...</div>';
+        }
+
+        async function testHealth() {
+            showLoading('health-result');
+            const result = await apiCall('/health');
+            showResult('health-result', result);
+        }
+
+        async function testBotStats() {
+            showLoading('bot-stats-result');
+            const result = await apiCall('/api/v1/admin/bot/stats/total');
+            showResult('bot-stats-result', result);
+        }
+
+        async function testListBots() {
+            showLoading('list-bots-result');
+            const result = await apiCall('/api/v1/admin/bot/');
+            showResult('list-bots-result', result);
+        }
+
+        async function testConversationStats() {
+            showLoading('conversation-stats-result');
+            const result = await apiCall('/api/v1/admin/conversation/stats/total');
+            showResult('conversation-stats-result', result);
+        }
+
+        async function testListConversations() {
+            showLoading('list-conversations-result');
+            const result = await apiCall('/api/v1/admin/conversation/');
+            showResult('list-conversations-result', result);
+        }
+
+        async function testCoreAIStats() {
+            showLoading('core-ai-stats-result');
+            const result = await apiCall('/api/v1/admin/core-ai/stats/total');
+            showResult('core-ai-stats-result', result);
+        }
+
+        async function testPlatformStats() {
+            showLoading('platform-stats-result');
+            const result = await apiCall('/api/v1/admin/platform/stats/total');
+            showResult('platform-stats-result', result);
+        }
+
+        async function testListPlatforms() {
+            showLoading('list-platforms-result');
+            const result = await apiCall('/api/v1/admin/platform/');
+            showResult('list-platforms-result', result);
+        }
+
+        async function testListCoreAI() {
+            showLoading('list-core-ai-result');
+            const result = await apiCall('/api/v1/admin/core-ai/');
+            showResult('list-core-ai-result', result);
+        }
+
+        // Auto-run health check on page load
+        window.addEventListener('load', testHealth);
+    </script>
+</body>
+</html>

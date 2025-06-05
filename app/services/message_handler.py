@@ -1,10 +1,10 @@
 import asyncio
+from typing import Dict, Any, Optional, List, Union
+import structlog
+import json
 import time
 import uuid
-import json
-from typing import Dict, Any, Optional, List
-from sqlalchemy.ext.asyncio import AsyncSession
-import structlog
+import re
 
 from app.core.redis_client import get_redis_client
 from app.core.database import async_session_factory
@@ -14,6 +14,7 @@ from app.crud.platform_crud import PlatformCRUD
 from app.crud.conversation_crud import ConversationCRUD
 from app.utils.common import history_parser
 from app.clients.core_ai_client import get_ai_service
+from app.clients.platform_client import PlatformClient, get_platform_client
 
 logger = structlog.get_logger(__name__)
 
@@ -225,11 +226,15 @@ class MessageLockManager:
 class BackgroundJobManager:
     """Simple background job manager for AI processing"""
 
-    def __init__(self):
+    def __init__(self, parent_handler=None):
         self.redis = None
         self.job_prefix = "ai_job:"
         self.job_ttl = 3600  # 1 hour
         self._fallback_jobs = {}  # In-memory fallback for testing
+        self._worker_task = None
+        self._worker_running = False
+        self._processing_queue = asyncio.Queue()
+        self.parent_handler = parent_handler  # Reference to parent MessageHandler
 
     async def initialize(self):
         """Initialize job manager"""
@@ -243,7 +248,7 @@ class BackgroundJobManager:
 
     async def create_ai_processing_job(self, payload: Dict[str, Any]) -> str:
         """Create an AI processing job"""
-        job_id = str(uuid.uuid4())
+        job_id = str(time.time())
         job_key = f"{self.job_prefix}{job_id}"
 
         job_data = {
@@ -263,8 +268,13 @@ class BackgroundJobManager:
             logger.warning("Redis job creation failed, using fallback", error=str(e))
             self._fallback_jobs[job_key] = job_data
 
-        # Start AI processing (in real implementation, this would queue to worker)
-        asyncio.create_task(self._process_ai_job(job_id))
+        # Queue the job for processing by background worker
+        if self._worker_running:
+            await self._queue_job_for_processing(job_id)
+        else:
+            # Fallback: process immediately if worker not running
+            logger.warning("Background worker not running, processing job immediately", job_id=job_id)
+            asyncio.create_task(self._process_ai_job(job_id))
 
         return job_id
 
@@ -272,8 +282,15 @@ class BackgroundJobManager:
         """Process AI job using real AI service"""
         job_key = f"{self.job_prefix}{job_id}"
 
+        # Check if job was cancelled before we even start processing
+        if await self._check_job_cancellation(job_id):
+            logger.info("Job was cancelled before processing started", job_id=job_id)
+            return
+
         # Update status to processing
-        await self._update_job_status(job_id, "processing")
+        await self._update_job_status(job_id, "processing", {
+            "processing_started_at": time.time()
+        })
 
         try:
             # Get job data to extract payload
@@ -292,14 +309,29 @@ class BackgroundJobManager:
                 })
                 return
 
+            # Check for cancellation again after fetching job data
+            if await self._check_job_cancellation(job_id):
+                logger.info("Job was cancelled during data fetching", job_id=job_id)
+                return
+
             payload = job_data.get("payload", {})
             conversation_id = payload.get("conversation_id")
+            platform_conversation_id = payload.get("platform_conversation_id", "")
             messages = payload.get("messages", [])
             bot_config = payload.get("bot_config", {})
             ai_config = payload.get("ai_config", {})
+            platform_config = payload.get("platform_config", {})
+            resources = payload.get("resources", {})
+            lock_id = payload.get("lock_id", "")
 
             # Get AI service instance
             ai_service = get_ai_service()
+            platform_client = get_platform_client()
+
+            # Final check for cancellation before starting AI processing
+            if await self._check_job_cancellation(job_id):
+                logger.info("Job was cancelled before AI processing", job_id=job_id)
+                return
 
             # Process the job using real AI service with message array
             ai_result = await ai_service.process_job(
@@ -309,19 +341,24 @@ class BackgroundJobManager:
                 context={
                     "bot_config": bot_config,
                     "ai_config": ai_config,
-                    "resources": payload.get("resources", {})
+                    "resources": resources,
+                    "lock_id": lock_id
                 },
                 core_ai_id=ai_config.get("core_ai_id")
             )
 
+            # Check if job was cancelled during AI processing
+            if await self._check_job_cancellation(job_id):
+                logger.info("Job was cancelled during AI processing",
+                           job_id=job_id,
+                           conversation_id=conversation_id)
+                return
+
             # Update status based on AI processing result
             if ai_result.get("success"):
                 await self._update_job_status(job_id, "completed", {
-                    "ai_response": ai_result.get("response", ""),
-                    "ai_actions": ai_result.get("actions", []),
-                    "ai_intent": ai_result.get("intent"),
-                    "ai_confidence": ai_result.get("confidence"),
-                    "ai_provider": ai_result.get("ai_provider"),
+                    "ai_response": ai_result.get("data", {}),
+                    "ai_action": ai_result.get("action", ""),
                     "processing_time_ms": ai_result.get("processing_time_ms"),
                     "conversation_turns": ai_result.get("conversation_turns", 0),
                     "completed_at": time.time()
@@ -329,12 +366,69 @@ class BackgroundJobManager:
                 logger.info("AI job completed successfully",
                            job_id=job_id,
                            conversation_id=conversation_id,
-                           ai_provider=ai_result.get("ai_provider"),
+                           ai_action=ai_result.get("action", ""),
                            conversation_turns=ai_result.get("conversation_turns"))
+
+                ai_action = ai_result.get("action", "")
+                ai_response = ai_result.get("data", {})
+
+                print("=========== AI ACTION ===========")
+                print(ai_action)
+                print("=========== AI RESPONSE ===========")
+                print(ai_response)
+
+                if ai_action == "OUT_OF_SCOPE":
+                    ai_action = "NOTIFY"
+
+                # Implement platform history check and action execution
+                try:
+                    # Get the platform configuration for this job
+                    platform_id = platform_config.get("id")
+
+                    logger.info("Starting platform history validation",
+                               job_id=job_id,
+                               conversation_id=conversation_id,
+                               platform_id=platform_id)
+
+                    latest_history = await platform_client.get_conversation_history(
+                        conversation_id=platform_conversation_id,
+                        platform_config=platform_config
+                    )
+
+                    print("=========== LATEST HISTORY ===========")
+                    print(latest_history)
+                    print("=========== LATEST HISTORY ===========")
+
+                    old_history = await self.parent_handler._get_cached_history(platform_conversation_id)
+                    print("=========== OLD HISTORY ===========")
+                    print(old_history)
+                    print("=========== OLD HISTORY ===========")
+
+                    logger.info("Proceeding with platform action execution",
+                               job_id=job_id,
+                               conversation_id=platform_conversation_id)
+
+                    # Execute the AI action through platform
+                    await self.parent_handler._execute_platform_action(
+                        ai_action, ai_response, platform_conversation_id, platform_config, job_id, platform_client
+                    )
+
+                except Exception as e:
+                    logger.error("Error during platform action execution",
+                               job_id=job_id,
+                               conversation_id=conversation_id,
+                               error=str(e))
+                    # Mark job as completed but with error in platform action
+                    await self._update_job_status(job_id, "completed_with_error", {
+                        "ai_action": ai_action,
+                        "platform_error": str(e),
+                        "completed_at": time.time()
+                    })
+
             else:
                 await self._update_job_status(job_id, "failed", {
                     "error": ai_result.get("error", "AI processing failed"),
-                    "ai_provider": ai_result.get("ai_provider"),
+                    "ai_action": ai_result.get("action", ""),
                     "processing_time_ms": ai_result.get("processing_time_ms"),
                     "completed_at": time.time()
                 })
@@ -344,6 +438,11 @@ class BackgroundJobManager:
                             error=ai_result.get("error"))
 
         except Exception as e:
+            # Check if the exception was due to cancellation
+            if await self._check_job_cancellation(job_id):
+                logger.info("Job was cancelled during exception handling", job_id=job_id)
+                return
+
             logger.error("AI job processing error",
                         job_id=job_id,
                         error=str(e))
@@ -377,6 +476,12 @@ class BackgroundJobManager:
                     data["updated_at"] = time.time()
                     if additional_data:
                         data.update(additional_data)
+
+            logger.info("Job status updated",
+                       job_id=job_id,
+                       status=status,
+                       additional_data=additional_data)
+
         except Exception as e:
             logger.warning("Redis job update failed, using fallback", error=str(e))
             if job_key in self._fallback_jobs:
@@ -421,34 +526,136 @@ class BackgroundJobManager:
 
     async def cancel_job(self, job_id: str) -> bool:
         """Cancel a job"""
-        await self._update_job_status(job_id, "cancelled")
-        return True
+        try:
+            # First update the job status to cancelled
+            await self._update_job_status(job_id, "cancelled", {
+                "cancelled_at": time.time(),
+                "reason": "cancelled_by_user"
+            })
+
+            logger.info("Job cancelled successfully", job_id=job_id)
+            return True
+
+        except Exception as e:
+            logger.error("Failed to cancel job", job_id=job_id, error=str(e))
+            return False
+
+    async def _check_job_cancellation(self, job_id: str) -> bool:
+        """Check if a job has been cancelled"""
+        try:
+            job_status = await self.get_job_status(job_id)
+            return job_status.get("status") == "cancelled"
+        except Exception as e:
+            logger.warning("Failed to check job cancellation status", job_id=job_id, error=str(e))
+            return False
 
     async def get_worker_status(self) -> Dict[str, Any]:
         """Get worker status"""
         return {
             "redis_connected": bool(self.redis),
-            "status": "healthy",
-            "active_jobs": len(self._fallback_jobs) if not self.redis else 0
+            "worker_running": self._worker_running,
+            "worker_task_active": bool(self._worker_task and not self._worker_task.done()),
+            "queue_size": self._processing_queue.qsize(),
+            "fallback_jobs": len(self._fallback_jobs) if not self.redis else 0,
+            "status": "healthy" if self._worker_running else "stopped"
         }
 
     async def start_background_worker(self):
-        """Start background worker (placeholder)"""
+        """Start background worker"""
+        if self._worker_running:
+            logger.warning("Background worker already running")
+            return
+
+        self._worker_running = True
+        self._worker_task = asyncio.create_task(self._worker_loop())
         logger.info("Background worker started")
 
     async def stop_background_worker(self):
-        """Stop background worker (placeholder)"""
+        """Stop background worker"""
+        if not self._worker_running:
+            logger.warning("Background worker not running")
+            return
+
+        self._worker_running = False
+
+        if self._worker_task:
+            try:
+                # Cancel the worker task
+                self._worker_task.cancel()
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error("Error stopping background worker", error=str(e))
+            finally:
+                self._worker_task = None
+
         logger.info("Background worker stopped")
+
+    async def _worker_loop(self):
+        """Main worker loop that processes jobs from the queue"""
+        logger.info("Background worker loop started")
+
+        while self._worker_running:
+            try:
+                # Wait for job with timeout to allow periodic health checks
+                try:
+                    job_id = await asyncio.wait_for(
+                        self._processing_queue.get(),
+                        timeout=10.0
+                    )
+
+                    if job_id:
+                        logger.debug("Processing job from queue", job_id=job_id)
+                        await self._process_ai_job(job_id)
+                        self._processing_queue.task_done()
+
+                except asyncio.TimeoutError:
+                    # Timeout is normal, continue the loop
+                    continue
+
+            except asyncio.CancelledError:
+                logger.info("Worker loop cancelled")
+                break
+            except Exception as e:
+                logger.error("Error in worker loop", error=str(e))
+                # Continue running despite errors
+                await asyncio.sleep(1)
+
+        logger.info("Background worker loop stopped")
+
+    async def _queue_job_for_processing(self, job_id: str):
+        """Queue a job for background processing"""
+        try:
+            await self._processing_queue.put(job_id)
+            logger.debug("Job queued for processing", job_id=job_id)
+        except Exception as e:
+            logger.error("Failed to queue job", job_id=job_id, error=str(e))
+            # If queueing fails, process immediately as fallback
+            asyncio.create_task(self._process_ai_job(job_id))
 
     async def close(self):
         """Close job manager"""
+        logger.info("Closing background job manager")
+
+        # Stop the worker
+        await self.stop_background_worker()
+
+        # Clear any remaining jobs in queue
+        while not self._processing_queue.empty():
+            try:
+                self._processing_queue.get_nowait()
+                self._processing_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+
         logger.info("Background job manager closed")
 
 
 class BotConfigService:
     """Service for retrieving bot configuration"""
 
-    async def get_bot_config(self, conversation_id: str) -> Dict[str, Any]:
+    async def get_bot_config(self, section_id: str) -> Dict[str, Any]:
         """Get bot configuration for conversation"""
         try:
             async with async_session_factory() as session:
@@ -456,7 +663,7 @@ class BotConfigService:
                 bot_crud = BotCRUD(session)
 
                 # Get conversation to find bot_id
-                conversation = await conversation_crud.get_by_id(conversation_id)
+                conversation = await conversation_crud.get_by_id(section_id)
                 if not conversation:
                     # Return default bot config if conversation not found
                     return await self._get_default_bot_config()
@@ -500,8 +707,8 @@ class MessageHandler:
     def __init__(self):
         self.redis = None
         self.lock_manager = None
-        self.background_job_manager = BackgroundJobManager()
         self.bot_config_service = BotConfigService()
+        self.background_job_manager = None  # Will be set after initialization
         self._initialized = False
 
     async def initialize(self):
@@ -520,6 +727,7 @@ class MessageHandler:
 
             # Initialize components with Redis (or None for fallback)
             self.lock_manager = MessageLockManager(self.redis)
+            self.background_job_manager = BackgroundJobManager(self)
             await self.background_job_manager.initialize()
 
             self._initialized = True
@@ -533,6 +741,7 @@ class MessageHandler:
     async def handle_message_request(
         self,
         conversation_id: str,
+        bot_id: str,
         history: str,
         resources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -543,22 +752,37 @@ class MessageHandler:
             await self.initialize()
 
         logger.info("Handling message request",
+                   bot_id=bot_id,
                    conversation_id=conversation_id,
                    history_length=len(history)
                    )
 
+        # Get conversation by conversation ID
+        async with async_session_factory() as session:
+            conversation_crud = ConversationCRUD(session)
+            conversation = await conversation_crud.get_by_conversation_id(conversation_id)
+            if not conversation:
+                conversation = await conversation_crud.create_conversation_by_bot_and_conversation_id(uuid.UUID(bot_id), conversation_id)
+            section_id = str(conversation.id)
+
         try:
             # Step 1: Cut old history from new history to get only new part for processing
-            effective_history = await self._cut_old_history(conversation_id, history)
+            effective_history = await self._cut_old_history(section_id, history)
             if len(effective_history) != len(history):
                 logger.info("Cut old history from new history",
-                           conversation_id=conversation_id,
+                           section_id=section_id,
                            original_length=len(history),
                            effective_length=len(effective_history),
                            cut_amount=len(history) - len(effective_history))
+            # if len(effective_history) == 0:
+            #     return {
+            #         "success": True,
+            #         "status": "no_history",
+            #         "message": "No history to process"
+            #     }
 
             # Step 2: Get bot configuration
-            bot_config = await self.bot_config_service.get_bot_config(conversation_id)
+            bot_config = await self.bot_config_service.get_bot_config(section_id)
             logger.info("Bot config retrieved", bot_name=bot_config.get("name"))
 
             # Step 3: Get AI core configuration
@@ -568,18 +792,16 @@ class MessageHandler:
             platform_config = await self._get_platform_config(bot_config.get("platform_id"))
 
             # Step 5: Parse the effective (new) history into structured messages
-            parsed_messages = await self._chunk_and_parse_history(
+            parsed_messages = await self._parse_history(
                 effective_history,
-                conversation_id=conversation_id
+                conversation_id=section_id
             )
-
             # Step 6: Check lock and consolidate messages if needed
             lock_result = await self.lock_manager.check_and_acquire_lock(
-                conversation_id=conversation_id,
+                conversation_id=section_id,
                 history=effective_history,  # Use effective history for lock
                 resources=resources
             )
-
             logger.info("Lock check completed",
                        action=lock_result["action"],
                        should_call_ai=lock_result["should_call_ai"],
@@ -592,7 +814,7 @@ class MessageHandler:
                     await self.background_job_manager.cancel_job(lock_result["previous_ai_job_id"])
                     logger.info("Previous AI job cancelled",
                                cancelled_job_id=lock_result["previous_ai_job_id"],
-                               conversation_id=conversation_id)
+                               conversation_id=section_id)
                 except Exception as cancel_error:
                     logger.warning("Failed to cancel previous job",
                                   job_id=lock_result["previous_ai_job_id"],
@@ -601,6 +823,7 @@ class MessageHandler:
             if lock_result["should_call_ai"]:
                 # Start AI processing with new history only
                 ai_job_id = await self._start_ai_processing(
+                    section_id=section_id,
                     conversation_id=conversation_id,
                     lock_data=lock_result["lock_data"],
                     bot_config=bot_config,
@@ -612,11 +835,11 @@ class MessageHandler:
 
                 # Update lock with AI job ID
                 await self.lock_manager.update_lock_with_ai_job(
-                    conversation_id, ai_job_id
+                    section_id, ai_job_id
                 )
 
                 # Cache the current full history for next time
-                await self._cache_processed_history(conversation_id, history)
+                await self._cache_processed_history(section_id, history)
 
                 action_description = "Message received and AI processing started with new history only"
                 if lock_result.get("should_cancel_previous"):
@@ -651,7 +874,7 @@ class MessageHandler:
             # Release lock on error
             if self.lock_manager:
                 try:
-                    await self.lock_manager.release_lock(conversation_id)
+                    await self.lock_manager.release_lock(section_id)
                 except Exception as lock_error:
                     logger.error("Failed to release lock", error=str(lock_error))
 
@@ -662,33 +885,32 @@ class MessageHandler:
                 "message": f"Message processing failed: {str(e)}"
             }
 
-    async def _cut_old_history(self, conversation_id: str, current_history: str) -> str:
+    async def _cut_old_history(self, section_id: str, current_history: str) -> str:
         """Cut old history from new history and return only the new part for processing"""
         try:
             # Step 1: Get old processed history from Redis cache first
-            old_history = await self._get_cached_history(conversation_id)
+            old_history = await self._get_cached_history(section_id)
             # Step 2: If no cache, get last processed history from database
             if not old_history:
-                old_history = await self._get_last_processed_history_from_db(conversation_id)
-
+                old_history = await self._get_processed_history(section_id)
             # Step 3: Cut old history from current to get only new part
             if old_history:
-                new_history_part = await self._cut_old_history(current_history, old_history)
+                new_history_part = await self._cut_history(current_history, old_history)
                 logger.debug("Cut old history from current",
-                           conversation_id=conversation_id,
+                           section_id=section_id,
                            current_length=len(current_history),
                            old_length=len(old_history),
                            new_part_length=len(new_history_part))
                 return new_history_part
             else:
                 logger.debug("No old history found, using full history",
-                           conversation_id=conversation_id,
+                           section_id=section_id,
                            current_length=len(current_history))
                 return current_history
 
         except Exception as e:
             logger.warning("Failed to cut old history, using full history",
-                          conversation_id=conversation_id,
+                          section_id=section_id,
                           error=str(e))
             return current_history
 
@@ -715,7 +937,7 @@ class MessageHandler:
                 return {
                     "core_ai_id": "default",
                     "name": "Default AI",
-                    "api_endpoint": "http://localhost:8000/ai",
+                    "api_endpoint": "http://localhost:8000",
                     "auth_required": False,
                     "timeout_seconds": 30,
                     "meta_data": {}
@@ -731,8 +953,12 @@ class MessageHandler:
                 platform_crud = PlatformCRUD(session)
 
                 if platform_id and platform_id != "default":
-                    platform = await platform_crud.get_by_id(uuid.UUID(platform_id))
+                    platform = await platform_crud.get_by_id_with_actions(uuid.UUID(platform_id))
                     if platform and platform.is_active:
+                        if platform.actions:
+                            actions = [action.model_dump() for action in platform.actions]
+                        else:
+                            actions = []
                         return {
                             "platform_id": str(platform.id),
                             "name": platform.name,
@@ -740,7 +966,8 @@ class MessageHandler:
                             "base_url": platform.base_url,
                             "auth_required": platform.auth_required,
                             "auth_token": platform.auth_token,
-                            "meta_data": platform.meta_data
+                            "meta_data": platform.meta_data,
+                            "actions": actions
                         }
 
                 # Return default platform config
@@ -756,19 +983,41 @@ class MessageHandler:
             logger.error("Error getting platform config", error=str(e))
             return {"platform_id": "default", "name": "Default Platform"}
 
-    async def _chunk_and_parse_history(self, history: str, max_messages: int = 20, max_chars: int = 10000, conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def _parse_history(self, history: str, conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Parse and chunk history into structured messages"""
         try:
             if not history:
                 return []
 
-            # Parse the history into structured messages with chunking limits
-            messages = await self._parse_chunked_history(history)
+            # Find all message patterns with their positions in the text
+            message_data = []
 
-            logger.info("History chunked and parsed",
-                       original_length=len(history),
-                       message_count=len(messages),
-                       max_messages=max_messages)
+            patterns = [
+                (r'<USER>(.*?)</USER>', 'user'),
+                (r'<BOT>(.*?)</BOT>', 'bot'),
+                (r'<SALE>(.*?)</SALE>', 'sale')
+            ]
+
+            for pattern, role in patterns:
+                for match in re.finditer(pattern, history, re.DOTALL):
+                    message_data.append({
+                        "role": role,
+                        "content": match.group(1).strip(),
+                        "timestamp": time.time(),
+                        "position": match.start()  # For proper ordering
+                    })
+
+            # Sort by position in original string to maintain chronological order
+            message_data.sort(key=lambda x: x["position"])
+
+            # Remove position field and return clean message list
+            messages = []
+            for msg in message_data:
+                messages.append({
+                    "role": "user" if msg["role"] == "user" else "assistant",
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"]
+                })
 
             return messages
 
@@ -829,7 +1078,7 @@ class MessageHandler:
                           error=str(e))
             return None
 
-    async def _cut_old_history(self, current_history: str, old_history: str) -> str:
+    async def _cut_history(self, current_history: str, old_history: str) -> str:
         """Cut old history from current history to get only new messages"""
         try:
             if not old_history or old_history not in current_history:
@@ -918,6 +1167,7 @@ class MessageHandler:
 
     async def _start_ai_processing(
         self,
+        section_id: str,
         conversation_id: str,
         lock_data: Dict[str, Any],
         bot_config: Dict[str, Any],
@@ -929,7 +1179,8 @@ class MessageHandler:
         """Start background AI processing job"""
 
         ai_job_payload = {
-            "conversation_id": conversation_id,
+            "conversation_id": section_id,
+            "platform_conversation_id": conversation_id,
             "lock_id": lock_data["lock_id"],
             "messages": messages,
             "bot_config": bot_config,
@@ -944,7 +1195,7 @@ class MessageHandler:
         )
 
         logger.info("AI processing job created",
-                   conversation_id=conversation_id,
+                   conversation_id=section_id,
                    ai_job_id=ai_job_id,
                    message_count=len(messages))
 
@@ -1070,6 +1321,156 @@ class MessageHandler:
             logger.error("Failed to cleanup old locks", error=str(e))
             return 0
 
+    async def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
+        """Cleanup old jobs older than max_age_hours"""
+        try:
+            cleanup_count = 0
+            cutoff_time = time.time() - (max_age_hours * 3600)
+
+            if self.redis:
+                # Get all job keys
+                pattern = f"{self.background_job_manager.job_prefix}*"
+                keys = await self.redis.keys(pattern)
+
+                for key in keys:
+                    try:
+                        job_data = await self.redis.get(key)
+                        if job_data:
+                            data = json.loads(job_data)
+                            created_at = data.get("created_at", 0)
+
+                            if created_at < cutoff_time:
+                                await self.redis.delete(key)
+                                cleanup_count += 1
+                                logger.debug("Cleaned up old job",
+                                           job_key=key,
+                                           age_hours=(time.time() - created_at) / 3600)
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.warning("Error processing job for cleanup",
+                                     job_key=key, error=str(e))
+                        # Delete corrupted job data
+                        await self.redis.delete(key)
+                        cleanup_count += 1
+            else:
+                # Fallback cleanup for in-memory jobs
+                keys_to_remove = []
+                for key, data in self.background_job_manager._fallback_jobs.items():
+                    created_at = data.get("created_at", 0)
+                    if created_at < cutoff_time:
+                        keys_to_remove.append(key)
+
+                for key in keys_to_remove:
+                    del self.background_job_manager._fallback_jobs[key]
+                    cleanup_count += len(keys_to_remove)
+
+            logger.info("Job cleanup completed",
+                       cleanup_count=cleanup_count,
+                       max_age_hours=max_age_hours)
+
+            return cleanup_count
+
+        except Exception as e:
+            logger.error("Error during job cleanup", error=str(e))
+            return 0
+
+    async def _execute_platform_action(
+        self,
+        ai_action: str,
+        ai_response: Dict[str, Any],
+        conversation_id: str,
+        platform_config: Dict[str, Any],
+        job_id: str,
+        platform_client: PlatformClient = None
+    ):
+        """Execute the AI action through the platform"""
+        try:
+            platform_id = platform_config.get("platform_id") or platform_config.get("id")
+            platform_name = platform_config.get("name", "Unknown Platform")
+
+            logger.info("Executing platform action",
+                       job_id=job_id,
+                       conversation_id=conversation_id,
+                       ai_action=ai_action,
+                       platform_id=platform_id,
+                       platform_name=platform_name)
+
+            # For now, we'll implement a simplified action execution
+            # In a full implementation, this would make HTTP calls to the platform's API
+            action_executed = False
+
+            platform_actions = platform_config.get("actions", [])
+
+            actions_map = {}
+            for action in platform_actions:
+                actions_map[action.get("name")] = {
+                    "path": action.get("path"),
+                    "method": action.get("method"),
+                    "meta_data": action.get("meta_data")
+                }
+
+            platform_action = actions_map.get(ai_action, None)
+
+            if platform_action:
+                # Log bot response that would be sent to platform
+                path = platform_action.get("path")
+                method = platform_action.get("method")
+                meta_data = platform_action.get("meta_data")
+
+                url = f"{platform_config.get('base_url')}{path}"
+
+                await platform_client.execute_platform_action(
+                    platform_config,
+                    url,
+                    method,
+                    meta_data,
+                    conversation_id,
+                    ai_response,
+                    ai_action
+                )
+
+                action_executed = True
+
+            else:
+                logger.warning("Unknown AI action type",
+                             job_id=job_id,
+                             conversation_id=conversation_id,
+                             ai_action=ai_action,
+                             platform_name=platform_name)
+
+            # Update job status with action execution results
+            if action_executed:
+                await self.background_job_manager._update_job_status(job_id, "completed", {
+                    "ai_action": ai_action,
+                    "platform_action_executed": True,
+                    "platform_name": platform_name,
+                    "completed_at": time.time()
+                })
+                logger.info("Platform action execution completed",
+                           job_id=job_id,
+                           ai_action=ai_action)
+            else:
+                await self.background_job_manager._update_job_status(job_id, "completed", {
+                    "ai_action": ai_action,
+                    "platform_action_executed": False,
+                    "platform_name": platform_name,
+                    "note": "Action logged but not executed (implementation pending)",
+                    "completed_at": time.time()
+                })
+
+        except Exception as e:
+            logger.error("Error executing platform action",
+                        job_id=job_id,
+                        conversation_id=conversation_id,
+                        ai_action=ai_action,
+                        error=str(e))
+
+            # Update job status as failed
+            await self.background_job_manager._update_job_status(job_id, "failed", {
+                "error": f"Platform action execution failed: {str(e)}",
+                "ai_action": ai_action,
+                "completed_at": time.time()
+            })
+
     async def close(self):
         """Clean up all resources"""
         logger.info("Closing enhanced message handler")
@@ -1079,117 +1480,3 @@ class MessageHandler:
 
         self._initialized = False
         logger.info("Enhanced message handler closed")
-
-    async def _chunk_old_history(self, history: str, max_messages: int = 20, max_chars: int = 10000) -> str:
-        """Chunk old history to keep only recent messages within limits"""
-        try:
-            import re
-
-            # Find all message blocks with their positions
-            message_pattern = r'(<(?:USER|BOT|SALE)>.*?</(?:USER|BOT|SALE)>(?:<br>|$))'
-            matches = list(re.finditer(message_pattern, history, re.DOTALL))
-
-            if not matches:
-                # No structured messages found, truncate by characters
-                logger.warning("No structured messages found in history, truncating by characters")
-                return history[-max_chars:] if len(history) > max_chars else history
-
-            logger.debug("Found message blocks",
-                        total_messages=len(matches),
-                        original_chars=len(history),
-                        max_messages=max_messages,
-                        max_chars=max_chars)
-
-            # Strategy: Keep recent messages within both message count and character limits
-            recent_messages = []
-            total_chars = 0
-
-            # Work backwards from the end to keep most recent messages
-            for match in reversed(matches):
-                message_text = match.group(1)
-
-                # Check if adding this message would exceed limits
-                if (len(recent_messages) >= max_messages or
-                    total_chars + len(message_text) > max_chars):
-                    logger.debug("Stopping message collection",
-                                message_count=len(recent_messages),
-                                chars_so_far=total_chars,
-                                would_add_chars=len(message_text),
-                                max_messages=max_messages,
-                                max_chars=max_chars)
-                    break
-
-                recent_messages.append(message_text)
-                total_chars += len(message_text)
-
-            # Reverse to get chronological order
-            recent_messages.reverse()
-
-            # Join the recent messages
-            chunked_history = ''.join(recent_messages)
-
-            logger.info("History chunked",
-                       original_messages=len(matches),
-                       kept_messages=len(recent_messages),
-                       original_chars=len(history),
-                       chunked_chars=len(chunked_history))
-
-            return chunked_history
-
-        except Exception as e:
-            logger.error("Error chunking history", error=str(e))
-            # Fallback: simple character truncation
-            return history[-max_chars:] if len(history) > max_chars else history
-
-    async def _parse_chunked_history(self, chunked_history: str) -> List[Dict[str, Any]]:
-        """Parse chunked history into structured messages with proper ordering"""
-        try:
-            if not chunked_history:
-                return []
-
-            import re
-
-            # Find all message patterns with their positions in the text
-            message_data = []
-
-            patterns = [
-                (r'<USER>(.*?)</USER>', 'user'),
-                (r'<BOT>(.*?)</BOT>', 'bot'),
-                (r'<SALE>(.*?)</SALE>', 'sale')
-            ]
-
-            for pattern, role in patterns:
-                for match in re.finditer(pattern, chunked_history, re.DOTALL):
-                    message_data.append({
-                        "role": role,
-                        "content": match.group(1).strip(),
-                        "timestamp": time.time(),
-                        "position": match.start()  # For proper ordering
-                    })
-
-            # Sort by position in original string to maintain chronological order
-            message_data.sort(key=lambda x: x["position"])
-
-            # Remove position field and return clean message list
-            messages = []
-            for msg in message_data:
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"],
-                    "timestamp": msg["timestamp"]
-                })
-
-            logger.debug("Parsed chunked history",
-                        message_count=len(messages),
-                        roles=[msg["role"] for msg in messages])
-
-            return messages
-
-        except Exception as e:
-            logger.error("Error parsing chunked history", error=str(e))
-            return [{"role": "user", "content": chunked_history, "timestamp": time.time()}]
-
-    async def _parse_history(self, history: str) -> List[Dict[str, Any]]:
-        """Parse conversation history into structured messages (legacy method)"""
-        # Use the new chunking method with default limits
-        return await self._chunk_and_parse_history(history, max_messages=20, max_chars=10000)

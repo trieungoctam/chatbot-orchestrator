@@ -50,6 +50,7 @@ class ConversationCRUD:
 
         response_data = ConversationResponse(
             id=str(conversation.id),
+            conversation_id=str(conversation.conversation_id),
             bot_id=str(conversation.bot_id),
             status=conversation.status,
             context=conversation.context,
@@ -60,6 +61,48 @@ class ConversationCRUD:
         )
 
         return response_data
+
+    async def create_conversation_by_bot_and_conversation_id(self, bot_id: uuid.UUID, conversation_id: str) -> ConversationResponse:
+        """Create a new Conversation by Bot and Conversation ID."""
+        conversation = Conversation(
+            conversation_id=conversation_id,
+            bot_id=bot_id,
+            status="active",
+            history=""
+        )
+        self.db.add(conversation)
+        await self.db.commit()
+        await self.db.refresh(conversation)
+        return ConversationResponse(
+            id=str(conversation.id),
+            conversation_id=str(conversation.conversation_id),
+            bot_id=str(conversation.bot_id),
+            status=conversation.status,
+            context=conversation.context,
+            history=conversation.history,
+            message_count=conversation.message_count,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at
+        )
+
+    async def get_by_conversation_id(self, conversation_id: str) -> Optional[ConversationResponse]:
+        """Get Conversation by Conversation ID."""
+        stmt = select(Conversation).where(Conversation.conversation_id == conversation_id)
+        result = await self.db.execute(stmt)
+        conversation = result.scalar_one_or_none()
+        if conversation:
+            return ConversationResponse(
+                id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
+                bot_id=str(conversation.bot_id),
+                status=conversation.status,
+                context=conversation.context,
+                history=conversation.history,
+                message_count=conversation.message_count,
+                created_at=conversation.created_at,
+                updated_at=conversation.updated_at
+            )
+        return None
 
     async def get_by_id(self, conversation_id: uuid.UUID) -> Optional[ConversationResponse]:
         """Get Conversation by ID with all relationships."""
@@ -77,6 +120,7 @@ class ConversationCRUD:
         if conversation:
             return ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -96,6 +140,7 @@ class ConversationCRUD:
         if conversation:
             return ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -122,6 +167,7 @@ class ConversationCRUD:
         for conversation in conversations:
             conversation_responses.append(ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -150,6 +196,7 @@ class ConversationCRUD:
         for conversation in conversations:
             conversation_responses.append(ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -178,6 +225,7 @@ class ConversationCRUD:
         for conversation in conversations:
             conversation_responses.append(ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -205,6 +253,7 @@ class ConversationCRUD:
         for conversation in conversations:
             conversation_responses.append(ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -233,6 +282,7 @@ class ConversationCRUD:
         for conversation in conversations:
             conversation_responses.append(ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -262,6 +312,7 @@ class ConversationCRUD:
         for conversation in conversations:
             conversation_responses.append(ConversationResponse(
                 id=str(conversation.id),
+                conversation_id=str(conversation.conversation_id),
                 bot_id=str(conversation.bot_id),
                 status=conversation.status,
                 context=conversation.context,
@@ -304,6 +355,7 @@ class ConversationCRUD:
             await self.db.refresh(updated_conversation)
             response_data = ConversationResponse(
                 id=str(updated_conversation.id),
+                conversation_id=str(updated_conversation.conversation_id),
                 bot_id=str(updated_conversation.bot_id),
                 status=updated_conversation.status,
                 context=updated_conversation.context,
