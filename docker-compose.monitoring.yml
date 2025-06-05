@@ -1,0 +1,50 @@
+version: '3'
+
+services:
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki:/etc/loki
+    command: -config.file=/etc/loki/loki-config.yml
+    networks:
+      - monitoring-network
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - ./logs:/var/log/app
+      - ./monitoring/promtail:/etc/promtail
+    command: -config.file=/etc/promtail/promtail-config.yml
+    networks:
+      - monitoring-network
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - monitoring-network
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+networks:
+  monitoring-network:
+    driver: bridge
+
+volumes:
+  grafana-data:
+    driver: local

@@ -2,9 +2,10 @@
 Bot Models
 """
 
-from sqlalchemy import Column, String, Text, Boolean, ForeignKey
+from sqlalchemy import Column, String, Text, Boolean, ForeignKey, DateTime
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import relationship
+from datetime import datetime
 import uuid
 
 from app.db.base import Base
@@ -15,7 +16,7 @@ class Bot(Base):
 
     # Bot configuration
     name = Column(String(100), nullable=False, unique=True)
-    description = Column(Text)
+    description = Column(Text, nullable=True)
     core_ai_id = Column(UUID(as_uuid=True), ForeignKey("core_ai.id"))
     platform_id = Column(UUID(as_uuid=True), ForeignKey("platforms.id"))
     language = Column(String(10), default="vi")

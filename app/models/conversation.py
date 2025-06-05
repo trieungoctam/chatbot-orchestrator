@@ -14,12 +14,13 @@ class Conversation(Base):
 
     # Basic conversation info
     bot_id = Column(UUID(as_uuid=True), ForeignKey("bots.id"), nullable=False)
-    status = Column(String(50), default="active", nullable=False)  # active, ended, transferred
+    status = Column(String(50), default="active", nullable=False)  # active, ended, transferred, paused
 
     # Conversation metadata
     context = Column(JSONB, default=dict)
     history = Column(Text, default="")
     message_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
 
     # Relationships
     bot = relationship("Bot", back_populates="conversations")

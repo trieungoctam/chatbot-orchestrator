@@ -1,6 +1,7 @@
-from sqlalchemy import Column, String, Boolean, Integer, Text, ForeignKey
+from sqlalchemy import Column, String, Boolean, Integer, Text, ForeignKey, DateTime
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import relationship
+from datetime import datetime
 import uuid
 
 from app.db.base import Base
@@ -11,6 +12,7 @@ class Platform(Base):
 
     # Platform configuration
     name = Column(String(100), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
     base_url = Column(String(255), nullable=False)
     rate_limit_per_minute = Column(Integer, default=60)
     auth_required = Column(Boolean, default=False)
