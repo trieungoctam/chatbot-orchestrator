@@ -372,11 +372,6 @@ class BackgroundJobManager:
                 ai_action = ai_result.get("action", "")
                 ai_response = ai_result.get("data", {})
 
-                print("=========== AI ACTION ===========")
-                print(ai_action)
-                print("=========== AI RESPONSE ===========")
-                print(ai_response)
-
                 if ai_action == "OUT_OF_SCOPE":
                     ai_action = "NOTIFY"
 
