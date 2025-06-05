@@ -1,7 +1,30 @@
-### 1. Request
+Thiet
+
+### 0. Request
 ```json
 {
   "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "bot_id": int,
+  "messages": [
+    {
+      "role": "",
+      "content": ""
+    }
+  ],
+  "resource": {}
+}
+```
+
+---
+
+Minh
+
+### 1. Request
+
+api/v1/...{section_id}/...
+
+```json
+{
   "index": int,
   "messages": [
     {
@@ -9,7 +32,7 @@
       "content": ""
     }
   ],
-  "resources": {}
+  "resource": {}
 }
 ```
 
