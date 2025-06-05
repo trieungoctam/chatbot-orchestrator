@@ -117,6 +117,36 @@ Authorization: Bearer <token>  # When implemented
 }
 ```
 
+```json
+{
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "history": [
+    {
+      "role": "",
+      "content": ""
+    }
+  ],
+  "resources": {
+    "user_id": "user_123",
+    "session_type": "web",
+    "device": "desktop",
+    "context": {
+      "location": "homepage",
+      "referrer": "google"
+    }
+  }
+}
+```
+
+**AI Core Response**
+```json
+{
+  "conversation_id: "str",
+  "action": "str", # NEED_SALE, ....
+  "data": {}
+}
+```
+
 #### Response
 
 **Success Response (200 OK):**
