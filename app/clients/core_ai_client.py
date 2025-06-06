@@ -205,10 +205,6 @@ class DatabaseAIService:
                 "resource": resources or {}
             }
 
-            print("=========== PAYLOAD ===========")
-            print(payload)
-            print("=========== PAYLOAD ===========")
-
             # Add AI-specific context from meta_data
             # if config.get("meta_data"):
             #     payload["ai_config"] = config["meta_data"]

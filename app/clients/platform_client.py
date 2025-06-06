@@ -547,19 +547,32 @@ class PlatformClient:
             # Prepare headers
             headers = self._prepare_headers(config)
 
-            print("======== AI ACTION ===========")
-            print(json.dumps(ai_response, indent=4))
-            print("======== AI ACTION ===========")
-
             if ai_action == "CHAT":
+                answer = ai_response.get("answer", [])
+                if isinstance(answer, list):
+                    answers = []
+                    for ans in answer:
+                        answers.append(str(ans))
+                else:
+                    answers = [str(answer)]
+
+                sub_answer = ai_response.get("sub_answer", [])
+                if isinstance(sub_answer, list):
+                    sub_answers = []
+                    for ans in sub_answer:
+                        sub_answers.append(str(ans))
+                else:
+                    sub_answers = [str(sub_answer)]
+
                 payload = {
                     "conversation_id": conversation_id,
                     "response": {
-                        "answers": ai_response.get("answer", []),
+                        "answers": answers,
                         "images": ai_response.get("images", []),
-                        "sub_answers": ai_response.get("sub_answer", [])
+                        "sub_answers": sub_answers
                     }
                 }
+
             elif ai_action == "CREATE_ORDER":
                 chat_url = f"{config['base_url'].rstrip('/')}/send-message"
                 chat_ai_response = {
