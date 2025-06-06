@@ -547,6 +547,10 @@ class PlatformClient:
             # Prepare headers
             headers = self._prepare_headers(config)
 
+            print("======== AI ACTION ===========")
+            print(json.dumps(ai_response, indent=4))
+            print("======== AI ACTION ===========")
+
             if ai_action == "CHAT":
                 payload = {
                     "conversation_id": conversation_id,
