@@ -1,7 +1,7 @@
 class ChatApp {
     constructor() {
         this.config = {
-            apiEndpoint: 'http://localhost:8000',
+            apiEndpoint: 'http://0.0.0.0:8386',
             apiKey: '',
             currentConversationId: null,
             currentBotId: 'default-bot',

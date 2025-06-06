@@ -390,14 +390,25 @@ class BackgroundJobManager:
                         platform_config=platform_config
                     )
 
-                    print("=========== LATEST HISTORY ===========")
-                    print(latest_history)
-                    print("=========== LATEST HISTORY ===========")
+                    new_history = latest_history.get("history", "")
+                    old_history = await self.parent_handler._get_cached_history(conversation_id)
 
-                    old_history = await self.parent_handler._get_cached_history(platform_conversation_id)
-                    print("=========== OLD HISTORY ===========")
-                    print(old_history)
-                    print("=========== OLD HISTORY ===========")
+                    if len(new_history) > len(old_history):
+                        resources = latest_history.get("resources", {})
+                        await self.parent_handler._set_cached_history(conversation_id, new_history)
+                        # await self.parent_handler._set_history_in_db(conversation_id, new_history)
+                        await self.parent_handler.handle_message_request(
+                            conversation_id=conversation_id,
+                            bot_id=bot_config.get("bot_id"),
+                            history=new_history,
+                            resources=resources
+                        )
+
+                        logger.info("Platform history updated, proceeding with message request",
+                                    job_id=job_id,
+                                    conversation_id=conversation_id)
+
+                        return
 
                     logger.info("Proceeding with platform action execution",
                                job_id=job_id,
@@ -896,6 +907,10 @@ class MessageHandler:
                            current_length=len(current_history),
                            old_length=len(old_history),
                            new_part_length=len(new_history_part))
+
+                if len(new_history_part) > len(old_history):
+                    await self._set_cached_history(section_id, new_history_part)
+                    # await self._set_history_in_db(section_id, new_history)
                 return new_history_part
             else:
                 logger.debug("No old history found, using full history",
@@ -1021,6 +1036,32 @@ class MessageHandler:
             # Fallback: try to parse original history with basic truncation
             truncated_history = history[-max_chars:] if len(history) > max_chars else history
             return [{"role": "user", "content": truncated_history, "timestamp": time.time()}]
+
+    async def _set_history_in_db(self, conversation_id: str, history: str) -> bool:
+        """Set history in database"""
+        try:
+            async with async_session_factory() as session:
+                conversation_crud = ConversationCRUD(session)
+                await conversation_crud.update(uuid.UUID(conversation_id), {"history": history})
+                return True
+        except Exception as e:
+            logger.error("Error setting history in database", error=str(e))
+            return False
+
+    async def _set_cached_history(self, conversation_id: str, history: str) -> bool:
+        """Set cached history in Redis"""
+        try:
+            cache_key = f"processed_history:{conversation_id}"
+            cache_data = {
+                "history": history,
+                "processed_at": time.time(),
+                "history_length": len(history)
+            }
+            await self.redis.set(cache_key, json.dumps(cache_data), ex=3600)
+            return True
+        except Exception as e:
+            logger.error("Error setting cached history in Redis", error=str(e))
+            return False
 
     async def _get_cached_history(self, conversation_id: str) -> Optional[str]:
         """Get cached processed history from Redis"""

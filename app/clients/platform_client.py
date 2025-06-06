@@ -230,8 +230,7 @@ class PlatformClient:
                         "success": True,
                         "conversation_id": conversation_id,
                         "history": data.get("history", ""),
-                        "platform_provider": config["name"],
-                        "platform_id": config["platform_id"]
+                        "resources": data.get("resources", {})
                     }
 
                 else:
@@ -247,8 +246,7 @@ class PlatformClient:
                         "error": f"HTTP {response.status}: {error_text}",
                         "conversation_id": conversation_id,
                         "history": "",
-                        "platform_provider": config["name"],
-                        "platform_id": config["platform_id"]
+                        "resources": {}
                     }
 
         except Exception as e:
@@ -260,7 +258,8 @@ class PlatformClient:
                 "success": False,
                 "error": str(e),
                 "conversation_id": conversation_id,
-                "history": ""
+                "history": "",
+                "resources": {}
             }
 
     async def send_bot_response(
@@ -323,8 +322,6 @@ class PlatformClient:
                         "message_id": data.get("message_id"),
                         "timestamp": data.get("timestamp"),
                         "status": "sent",
-                        "platform_provider": config["name"],
-                        "platform_id": config["id"]
                     }
 
                 else:
@@ -339,8 +336,7 @@ class PlatformClient:
                         "success": False,
                         "error": f"HTTP {response.status}: {error_text}",
                         "conversation_id": conversation_id,
-                        "status": "failed",
-                        "platform_provider": config["name"]
+                        "status": "failed"
                     }
 
         except Exception as e:
@@ -490,8 +486,6 @@ class PlatformClient:
                         "success": True,
                         "bot_id": bot_id,
                         "config": data,
-                        "platform_provider": config["name"],
-                        "platform_id": config["id"]
                     }
 
                 else:
@@ -506,8 +500,7 @@ class PlatformClient:
                         "success": False,
                         "error": f"HTTP {response.status}: {error_text}",
                         "bot_id": bot_id,
-                        "config": {},
-                        "platform_provider": config["name"]
+                        "config": {}
                     }
 
         except Exception as e:
@@ -564,6 +557,12 @@ class PlatformClient:
                     }
                 }
             elif ai_action == "CREATE_ORDER":
+                product_id = ai_response.get("product_id", "")
+                try:
+                    product_id = int(product_id)
+                except:
+                    product_id = 0
+
                 payload = {
                     "conversation_id": conversation_id,
                     "customer_info": {
@@ -578,8 +577,8 @@ class PlatformClient:
                     },
                     "products": [
                         {
-                            "product_code": product.get("product_code", ""),
-                            "product_id_mapping": product.get("product_id_mapping", 0),
+                            "product_code": str(product_id),
+                            "product_id_mapping": product_id,
                             "product_name": product.get("product_name", ""),
                             "quantity": product.get("quantity", 0),
                             "price": product.get("price", 0)

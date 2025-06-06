@@ -1,7 +1,7 @@
 class AdminApp {
     constructor() {
         this.config = {
-            apiEndpoint: 'http://localhost:8000',
+            apiEndpoint: 'http://0.0.0.0:8386',
             apiKey: '',
             currentSection: 'dashboard'
         };
