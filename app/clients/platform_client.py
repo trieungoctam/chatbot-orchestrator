@@ -558,13 +558,18 @@ class PlatformClient:
                 }
             elif ai_action == "CREATE_ORDER":
                 chat_url = f"{config['base_url'].rstrip('/')}/send-message"
+                chat_ai_response = {
+                    "answer": [ai_response.get("answer", "")],
+                    "images": ai_response.get("images", []),
+                    "sub_answer": [ai_response.get("sub_answer", "")]
+                }
                 result = await self.execute_platform_action(
                     platform_config=config,
                     url=chat_url,
                     method="POST",
                     meta_data=meta_data,
                     conversation_id=conversation_id,
-                    ai_response=ai_response,
+                    ai_response=chat_ai_response,
                     ai_action="CHAT"
                 )
 
