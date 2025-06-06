@@ -558,11 +558,21 @@ class PlatformClient:
                 }
             elif ai_action == "CREATE_ORDER":
                 chat_url = f"{config['base_url'].rstrip('/')}/send-message"
-                chat_ai_response = {
-                    "answer": [ai_response.get("answer", "")],
-                    "images": ai_response.get("images", []),
-                    "sub_answer": [ai_response.get("sub_answer", "")]
-                }
+                chat_ai_response = {}
+                if ai_response.get("answer", None):
+                    answer = ai_response.get("answer")
+                    if isinstance(answer, str):
+                        chat_ai_response["answer"] = [answer]
+                    elif isinstance(answer, list):
+                        chat_ai_response["answer"] = answer
+                if ai_response.get("sub_answer", None):
+                    sub_answer = ai_response.get("sub_answer")
+                    if isinstance(sub_answer, str):
+                        chat_ai_response["sub_answer"] = [sub_answer]
+                    elif isinstance(sub_answer, list):
+                        chat_ai_response["sub_answer"] = sub_answer
+                chat_ai_response["images"] = ai_response.get("images", [])
+
                 result = await self.execute_platform_action(
                     platform_config=config,
                     url=chat_url,
