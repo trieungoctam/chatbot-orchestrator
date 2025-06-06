@@ -553,15 +553,15 @@ class PlatformClient:
                     "response": {
                         "answers": ai_response.get("answer", []),
                         "images": ai_response.get("images", []),
-                        "sub_answers": ai_response.get("sub_answers", [])
+                        "sub_answers": ai_response.get("sub_answer", [])
                     }
                 }
             elif ai_action == "CREATE_ORDER":
-
+                chat_url = f"{config['base_url'].rstrip('/')}/send-message"
                 result = await self.execute_platform_action(
                     platform_config=config,
-                    url=url,
-                    method=method,
+                    url=chat_url,
+                    method="POST",
                     meta_data=meta_data,
                     conversation_id=conversation_id,
                     ai_response=ai_response,
@@ -608,9 +608,9 @@ class PlatformClient:
                     "intent": ai_response.get("intent", "")
                 }
 
-            print("=========== PAYLOAD ===========")
+            print("=========== PAYLOAD PLATFORM CLIENT ===========")
             print(payload)
-            print("=========== PAYLOAD ===========")
+            print("=========== PAYLOAD PLATFORM CLIENT ===========")
 
             # TODO: Implement execute_map
             # execute_map = {
