@@ -123,7 +123,7 @@ class PlatformCRUD:
             platform = Platform(**data)
             self.db.add(platform)
             await self.db.commit()
-            await self.db.refresh(platform)
+            await self.db.refresh(platform, options=[selectinload(Platform.actions)])
 
             response_data = self._to_response(platform)
 
@@ -316,7 +316,7 @@ class PlatformCRUD:
 
             if updated_platform:
                 await self.db.commit()
-                await self.db.refresh(updated_platform)
+                await self.db.refresh(updated_platform, options=[selectinload(Platform.actions)])
 
                 response_data = self._to_response(updated_platform)
 
