@@ -230,6 +230,9 @@ class DatabaseAIService:
 
                 if response.status_code == 200:
                     result = response.json()
+                    print("======== RESULT ===========")
+                    print(json.dumps(result, indent=4))
+                    print("======== RESULT ===========")
                     action = result.get("action", "")
                     data = result.get("data", {})
 
