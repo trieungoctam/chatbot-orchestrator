@@ -557,6 +557,17 @@ class PlatformClient:
                     }
                 }
             elif ai_action == "CREATE_ORDER":
+
+                result = await self.execute_platform_action(
+                    platform_config=config,
+                    url=url,
+                    method=method,
+                    meta_data=meta_data,
+                    conversation_id=conversation_id,
+                    ai_response=ai_response,
+                    ai_action="CHAT"
+                )
+
                 product_id = ai_response.get("product_id", "")
                 try:
                     product_id = int(product_id)
