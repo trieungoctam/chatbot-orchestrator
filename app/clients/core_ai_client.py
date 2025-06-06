@@ -243,6 +243,13 @@ class DatabaseAIService:
                                     ai_name=config["name"],
                                     processing_time_ms=processing_time)
 
+                            print("======== AI PAYLOAD ===========")
+                            print(json.dumps(payload, indent=4))
+                            print("======== AI PAYLOAD ===========")
+                            print("======== AI RESPONSE ===========")
+                            print(json.dumps(result, indent=4))
+                            print("======== AI RESPONSE ===========")
+
                             return {
                                 "success": True,
                                 "action": action,

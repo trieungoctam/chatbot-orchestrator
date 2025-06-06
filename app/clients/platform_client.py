@@ -631,10 +631,6 @@ class PlatformClient:
                     "intent": ai_response.get("intent", "")
                 }
 
-            print("=========== PAYLOAD PLATFORM CLIENT ===========")
-            print(payload)
-            print("=========== PAYLOAD PLATFORM CLIENT ===========")
-
             # TODO: Implement execute_map
             # execute_map = {
             #     "POST": session.post,
@@ -651,6 +647,14 @@ class PlatformClient:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status in [200, 201]:
                     data = await response.json()
+
+                    print("======== PLATFORM PAYLOAD ===========")
+                    print(json.dumps(payload, indent=4))
+                    print("======== PLATFORM PAYLOAD ===========")
+
+                    print("======== PLATFORM RESPONSE ===========")
+                    print(json.dumps(data, indent=4))
+                    print("======== PLATFORM RESPONSE ===========")
 
                     logger.info("Successfully executed Platform action",
                                conversation_id=conversation_id,
