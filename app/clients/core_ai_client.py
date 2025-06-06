@@ -216,47 +216,88 @@ class DatabaseAIService:
             timeout = config.get("timeout_seconds", self.default_timeout)
 
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    api_endpoint,
-                    json=payload,
-                    headers=headers
-                )
+                start_time = time.time()
 
-                processing_time = int((time.time() - start_time) * 1000)
+                # Initialize retry counter
+                retries = 0
+                max_retries = 2
 
-                if response.status_code == 200:
-                    result = response.json()
-                    print("======== RESULT ===========")
-                    print(json.dumps(result, indent=4))
-                    print("======== RESULT ===========")
-                    action = result.get("action", "")
-                    data = result.get("data", {})
+                while retries <= max_retries:
+                    try:
+                        response = await client.post(
+                            api_endpoint,
+                            json=payload,
+                            headers=headers
+                        )
 
-                    logger.info("AI processing successful",
-                               conversation_id=conversation_id,
-                               ai_name=config["name"],
-                               processing_time_ms=processing_time)
+                        processing_time = int((time.time() - start_time) * 1000)
 
-                    return {
-                        "success": True,
-                        "action": action,
-                        "data": data,
-                        "processing_time_ms": processing_time,
-                    }
-                else:
-                    logger.error("AI processing failed",
-                               conversation_id=conversation_id,
-                               ai_name=config["name"],
-                               status_code=response.status_code,
-                               response_text=response.text[:200])
+                        if response.status_code == 200:
+                            result = response.json()
 
-                    return {
-                        "success": False,
-                        "error": f"AI service returned {response.status_code}: {response.text[:100]}",
-                        "action": "",
-                        "data": {},
-                        "processing_time_ms": processing_time,
-                    }
+                            action = result.get("action", "")
+                            data = result.get("data", {})
+
+                            logger.info("AI processing successful",
+                                    conversation_id=conversation_id,
+                                    ai_name=config["name"],
+                                    processing_time_ms=processing_time)
+
+                            return {
+                                "success": True,
+                                "action": action,
+                                "data": data,
+                                "processing_time_ms": processing_time,
+                            }
+                        else:
+                            retries += 1
+                            if retries <= max_retries:
+                                logger.warning("AI processing failed, retrying...",
+                                           conversation_id=conversation_id,
+                                           ai_name=config["name"],
+                                           status_code=response.status_code,
+                                           attempt=retries,
+                                           response_text=response.text[:200])
+                                # Wait before retrying (exponential backoff)
+                                await asyncio.sleep(2)
+                                continue
+
+                            logger.error("AI processing failed after all retries",
+                                    conversation_id=conversation_id,
+                                    ai_name=config["name"],
+                                    status_code=response.status_code,
+                                    response_text=response.text[:200])
+
+                            return {
+                                "success": False,
+                                "error": f"AI service returned {response.status_code}: {response.text[:100]} (after {retries} retries)",
+                                "action": "",
+                                "data": {},
+                                "processing_time_ms": processing_time,
+                            }
+                    except Exception as e:
+                        retries += 1
+                        if retries <= max_retries:
+                            logger.warning(f"AI request failed with exception, retrying...",
+                                       conversation_id=conversation_id,
+                                       ai_name=config["name"],
+                                       error=str(e),
+                                       attempt=retries)
+                            # Wait before retrying (exponential backoff)
+                            await asyncio.sleep(2)
+                            continue
+
+                        logger.error(f"AI request failed with exception after all retries",
+                                conversation_id=conversation_id,
+                                ai_name=config["name"],
+                                error=str(e))
+                        return {
+                            "success": False,
+                            "error": f"AI request failed: {str(e)} (after {retries} retries)",
+                            "action": "",
+                            "data": {},
+                            "processing_time_ms": int((time.time() - start_time) * 1000),
+                        }
 
         except httpx.TimeoutException:
             processing_time = int((time.time() - start_time) * 1000)
