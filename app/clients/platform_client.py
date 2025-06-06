@@ -548,12 +548,26 @@ class PlatformClient:
             headers = self._prepare_headers(config)
 
             if ai_action == "CHAT":
+                chat_ai_response = {}
+                if ai_response.get("answer", None):
+                    answer = ai_response.get("answer")
+                    if isinstance(answer, str):
+                        chat_ai_response["answer"] = [answer]
+                    elif isinstance(answer, list):
+                        chat_ai_response["answer"] = answer
+                if ai_response.get("sub_answer", None):
+                    sub_answer = ai_response.get("sub_answer")
+                    if isinstance(sub_answer, str):
+                        chat_ai_response["sub_answer"] = [sub_answer]
+                    elif isinstance(sub_answer, list):
+                        chat_ai_response["sub_answer"] = sub_answer
+                chat_ai_response["images"] = ai_response.get("images", [])
                 payload = {
                     "conversation_id": conversation_id,
                     "response": {
-                        "answers": ai_response.get("answer", []),
-                        "images": ai_response.get("images", []),
-                        "sub_answers": ai_response.get("sub_answer", [])
+                        "answers": chat_ai_response.get("answer", []),
+                        "images": chat_ai_response.get("images", []),
+                        "sub_answers": chat_ai_response.get("sub_answer", [])
                     }
                 }
             elif ai_action == "CREATE_ORDER":
