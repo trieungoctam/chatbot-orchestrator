@@ -33,7 +33,8 @@ from app.schemas.request import (
     CreatePlatformActionRequest, UpdatePlatformActionRequest
 )
 from app.schemas.response import (
-    PlatformResponse, CreatePlatformResponse, UpdatePlatformResponse, PlatformListResponse, PlatformAction,
+    PlatformResponse, CreatePlatformResponse, UpdatePlatformResponse, PlatformListResponse,
+    PlatformAction as PlatformActionSchema,  # Rename to avoid conflict
     PlatformActionResponse, CreatePlatformActionResponse, UpdatePlatformActionResponse, PlatformActionListResponse
 )
 
@@ -76,7 +77,7 @@ class PlatformCRUD:
         # Check if actions were eagerly loaded to avoid lazy loading issues
         if hasattr(platform, 'actions') and platform.actions is not None:
             for action in platform.actions:
-                action_response = PlatformAction(
+                action_response = PlatformActionSchema(
                     id=str(action.id),
                     platform_id=str(action.platform_id),
                     platform_name=platform.name,  # Use the current platform's name
@@ -667,10 +668,21 @@ class PlatformActionCRUD:
                 raise ValueError("Invalid platform_id: Platform not found")
 
             data = action_data.model_dump()
-            # Convert platform_id string to UUID
-            data['platform_id'] = uuid.UUID(data['platform_id'])
+            # Remove any fields that shouldn't be passed to SQLAlchemy
+            data.pop('platform_name', None)  # Remove Pydantic-only field
 
-            action = PlatformAction(**data)
+            # Create new action with proper UUID fields
+            action = PlatformAction(
+                id=uuid.uuid4(),
+                platform_id=uuid.UUID(data['platform_id']),
+                name=data['name'],
+                description=data.get('description'),
+                method=data['method'],
+                path=data['path'],
+                is_active=data.get('is_active', True),
+                meta_data=data.get('meta_data')
+            )
+
             self.db.add(action)
             await self.db.commit()
             await self.db.refresh(action)
