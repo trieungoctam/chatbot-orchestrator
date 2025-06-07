@@ -591,12 +591,6 @@ class PlatformClient:
                     ai_action="CHAT"
                 )
 
-                product_id = ai_response.get("product_id", "")
-                try:
-                    product_id = int(product_id)
-                except:
-                    product_id = 0
-
                 payload = {
                     "conversation_id": conversation_id,
                     "customer_info": {
@@ -611,8 +605,8 @@ class PlatformClient:
                     },
                     "products": [
                         {
-                            "product_code": str(product_id),
-                            "product_id_mapping": product_id,
+                            "product_code": str(product.get("product_id", "0")),
+                            "product_id_mapping": int(product.get("product_id", "0")),
                             "product_name": product.get("product_name", ""),
                             "quantity": product.get("quantity", 0),
                             "price": product.get("price", 0)

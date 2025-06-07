@@ -393,7 +393,15 @@ class BackgroundJobManager:
                     new_history = latest_history.get("history", "")
                     old_history = await self.parent_handler._get_cached_history(conversation_id)
 
+                    print("========== HISTORY ==========")
+                    print("new_history")
+                    print(json.dumps(new_history, indent=4))
+                    print("old_history")
+                    print(json.dumps(old_history, indent=4))
+                    print("========== HISTORY ==========")
+
                     if len(new_history) > len(old_history):
+                        print("========== CHUNK HISTORY ==========")
                         resources = latest_history.get("resources", {})
                         await self.parent_handler._set_cached_history(conversation_id, new_history)
                         # await self.parent_handler._set_history_in_db(conversation_id, new_history)
@@ -774,6 +782,9 @@ class MessageHandler:
         try:
             # Step 1: Cut old history from new history to get only new part for processing
             effective_history = await self._cut_old_history(section_id, history)
+            print("========== EFFECTIVE HISTORY ==========")
+            print(json.dumps(effective_history, indent=4))
+            print("========== EFFECTIVE HISTORY ==========")
             if len(effective_history) != len(history):
                 logger.info("Cut old history from new history",
                            section_id=section_id,
@@ -908,8 +919,8 @@ class MessageHandler:
                            old_length=len(old_history),
                            new_part_length=len(new_history_part))
 
-                if len(new_history_part) > len(old_history):
-                    await self._set_cached_history(section_id, new_history_part)
+                if len(current_history) > len(old_history):
+                    await self._set_cached_history(section_id, current_history)
                     # await self._set_history_in_db(section_id, new_history)
                 return new_history_part
             else:
