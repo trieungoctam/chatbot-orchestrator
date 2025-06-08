@@ -1,5 +1,7 @@
 import asyncio
 from typing import Dict, Any, Optional, List, Union
+from dataclasses import dataclass
+from abc import ABC, abstractmethod
 import structlog
 import json
 import time
@@ -18,15 +20,274 @@ from app.clients.platform_client import PlatformClient, get_platform_client
 
 logger = structlog.get_logger(__name__)
 
+# Constants
+LOCK_TTL_SECONDS = 3600  # 1 hour
+JOB_TTL_SECONDS = 3600   # 1 hour
+CACHE_TTL_SECONDS = 3600 # 1 hour
+WORKER_TIMEOUT_SECONDS = 10
+CLEANUP_MAX_AGE_HOURS = 24
+MAX_HISTORY_LENGTH = 10000
 
-class MessageLockManager:
-    """Simple message lock manager for preventing race conditions"""
+
+@dataclass
+class LockData:
+    """Lock data structure."""
+    conversation_id: str
+    history_hash: int
+    created_at: float
+    lock_id: int  # Changed from str to int for timestamp
+    consolidated_count: int = 1
+    updated_at: Optional[float] = None
+    ai_job_id: Optional[str] = None
+    previous_ai_job_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "conversation_id": self.conversation_id,
+            "history_hash": self.history_hash,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "lock_id": self.lock_id,
+            "ai_job_id": self.ai_job_id,
+            "previous_ai_job_id": self.previous_ai_job_id,
+            "consolidated_count": self.consolidated_count
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'LockData':
+        """Create from dictionary."""
+        return cls(
+            conversation_id=data["conversation_id"],
+            history_hash=data["history_hash"],
+            created_at=data["created_at"],
+            lock_id=data["lock_id"],
+            consolidated_count=data.get("consolidated_count", 1),
+            updated_at=data.get("updated_at"),
+            ai_job_id=data.get("ai_job_id"),
+            previous_ai_job_id=data.get("previous_ai_job_id")
+        )
+
+    @classmethod
+    def generate_lock_id(cls) -> int:
+        """Generate a new lock ID using current timestamp in milliseconds."""
+        return int(time.time() * 1000)
+
+
+@dataclass
+class JobData:
+    """Job data structure."""
+    job_id: str
+    status: str
+    created_at: float
+    payload: Dict[str, Any]
+    updated_at: Optional[float] = None
+    processing_started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "job_id": self.job_id,
+            "status": self.status,
+            "created_at": self.created_at,
+            "payload": self.payload,
+            "updated_at": self.updated_at,
+            "processing_started_at": self.processing_started_at,
+            "completed_at": self.completed_at,
+            "error": self.error
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'JobData':
+        """Create from dictionary."""
+        return cls(
+            job_id=data["job_id"],
+            status=data["status"],
+            created_at=data["created_at"],
+            payload=data["payload"],
+            updated_at=data.get("updated_at"),
+            processing_started_at=data.get("processing_started_at"),
+            completed_at=data.get("completed_at"),
+            error=data.get("error")
+        )
+
+
+class CacheProvider(ABC):
+    """Abstract cache provider interface."""
+
+    @abstractmethod
+    async def get(self, key: str) -> Optional[str]:
+        """Get value by key."""
+        pass
+
+    @abstractmethod
+    async def set(self, key: str, value: str, ttl: int = None) -> bool:
+        """Set value with optional TTL."""
+        pass
+
+    @abstractmethod
+    async def delete(self, key: str) -> bool:
+        """Delete key."""
+        pass
+
+    @abstractmethod
+    async def keys(self, pattern: str) -> List[str]:
+        """Get keys matching pattern."""
+        pass
+
+
+class RedisCacheProvider(CacheProvider):
+    """Redis-based cache provider."""
 
     def __init__(self, redis_client):
         self.redis = redis_client
+
+    async def get(self, key: str) -> Optional[str]:
+        """Get value by key."""
+        try:
+            return await self.redis.get(key)
+        except Exception as e:
+            logger.warning("Redis get failed", key=key, error=str(e))
+            return None
+
+    async def set(self, key: str, value: str, ttl: int = None) -> bool:
+        """Set value with optional TTL."""
+        try:
+            if ttl:
+                result = await self.redis.set(key, value, ex=ttl)
+            else:
+                result = await self.redis.set(key, value)
+            return bool(result)
+        except Exception as e:
+            logger.warning("Redis set failed", key=key, error=str(e))
+            return False
+
+    async def delete(self, key: str) -> bool:
+        """Delete key."""
+        try:
+            result = await self.redis.delete(key)
+            return bool(result)
+        except Exception as e:
+            logger.warning("Redis delete failed", key=key, error=str(e))
+            return False
+
+    async def keys(self, pattern: str) -> List[str]:
+        """Get keys matching pattern."""
+        try:
+            return await self.redis.keys(pattern)
+        except Exception as e:
+            logger.warning("Redis keys failed", pattern=pattern, error=str(e))
+            return []
+
+
+class MemoryCacheProvider(CacheProvider):
+    """In-memory fallback cache provider."""
+
+    def __init__(self):
+        self._cache = {}
+        self._ttl_cache = {}
+
+    async def get(self, key: str) -> Optional[str]:
+        """Get value by key."""
+        # Check TTL
+        if key in self._ttl_cache and time.time() > self._ttl_cache[key]:
+            self._cache.pop(key, None)
+            self._ttl_cache.pop(key, None)
+            return None
+
+        return self._cache.get(key)
+
+    async def set(self, key: str, value: str, ttl: int = None) -> bool:
+        """Set value with optional TTL."""
+        self._cache[key] = value
+        if ttl:
+            self._ttl_cache[key] = time.time() + ttl
+        return True
+
+    async def delete(self, key: str) -> bool:
+        """Delete key."""
+        deleted = key in self._cache
+        self._cache.pop(key, None)
+        self._ttl_cache.pop(key, None)
+        return deleted
+
+    async def keys(self, pattern: str) -> List[str]:
+        """Get keys matching pattern."""
+        # Simple pattern matching for fallback
+        import fnmatch
+        return [key for key in self._cache.keys() if fnmatch.fnmatch(key, pattern)]
+
+
+class CacheManager:
+    """Manages cache operations with fallback."""
+
+    def __init__(self, redis_client=None):
+        if redis_client:
+            self.primary = RedisCacheProvider(redis_client)
+        else:
+            self.primary = None
+        self.fallback = MemoryCacheProvider()
+
+    async def get_json(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get JSON value by key."""
+        value = await self._get(key)
+        if value:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON in cache", key=key)
+        return None
+
+    async def set_json(self, key: str, value: Dict[str, Any], ttl: int = None) -> bool:
+        """Set JSON value with optional TTL."""
+        try:
+            json_str = json.dumps(value)
+            return await self._set(key, json_str, ttl)
+        except (TypeError, ValueError) as e:
+            logger.warning("Failed to serialize JSON", key=key, error=str(e))
+            return False
+
+    async def delete(self, key: str) -> bool:
+        """Delete key from cache."""
+        success = False
+        if self.primary:
+            success = await self.primary.delete(key)
+        # Always try fallback as well
+        fallback_success = await self.fallback.delete(key)
+        return success or fallback_success
+
+    async def keys(self, pattern: str) -> List[str]:
+        """Get keys matching pattern."""
+        if self.primary:
+            return await self.primary.keys(pattern)
+        return await self.fallback.keys(pattern)
+
+    async def _get(self, key: str) -> Optional[str]:
+        """Get with fallback."""
+        if self.primary:
+            value = await self.primary.get(key)
+            if value is not None:
+                return value
+        return await self.fallback.get(key)
+
+    async def _set(self, key: str, value: str, ttl: int = None) -> bool:
+        """Set with fallback."""
+        success = False
+        if self.primary:
+            success = await self.primary.set(key, value, ttl)
+        # Always set in fallback as well
+        fallback_success = await self.fallback.set(key, value, ttl)
+        return success or fallback_success
+
+
+class MessageLockManager:
+    """Enhanced message lock manager with proper abstractions."""
+
+    def __init__(self, cache_manager: CacheManager):
+        self.cache = cache_manager
         self.lock_prefix = "msg_lock:"
-        self.lock_ttl = 3600  # 1 hour
-        self._fallback_locks = {}  # In-memory fallback for testing
 
     async def check_and_acquire_lock(
         self,
@@ -34,255 +295,241 @@ class MessageLockManager:
         history: str,
         resources: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Check if conversation needs lock and acquire if necessary"""
+        """Check if conversation needs lock and acquire if necessary."""
         lock_key = f"{self.lock_prefix}{conversation_id}"
 
         try:
-            # First check if lock already exists
-            existing_lock = None
-            if self.redis:
-                lock_data = await self.redis.get(lock_key)
-                if lock_data:
-                    try:
-                        existing_lock = json.loads(lock_data)
-                    except json.JSONDecodeError:
-                        existing_lock = None
-            else:
-                # Fallback to in-memory locks
-                existing_lock = self._fallback_locks.get(lock_key)
+            # Check for existing lock
+            existing_lock_data = await self.cache.get_json(lock_key)
+            existing_lock = LockData.from_dict(existing_lock_data) if existing_lock_data else None
 
             if existing_lock:
-                # Lock exists - need to cancel current job and reprocess with new history
-                logger.info("Existing lock found, cancelling current job and reprocessing",
-                           conversation_id=conversation_id,
-                           existing_ai_job_id=existing_lock.get("ai_job_id"))
-
-                updated_lock_data = {
-                    "conversation_id": conversation_id,
-                    "history_hash": hash(history),
-                    "created_at": time.time(),
-                    "updated_at": time.time(),
-                    "lock_id": existing_lock.get("lock_id"),
-                    "previous_ai_job_id": existing_lock.get("ai_job_id"),  # Track old job for cancellation
-                    "consolidated_count": existing_lock.get("consolidated_count", 0) + 1
-                }
-
-                # Update the lock with new data
-                try:
-                    if self.redis:
-                        await self.redis.set(lock_key, json.dumps(updated_lock_data), ex=self.lock_ttl)
-                    else:
-                        self._fallback_locks[lock_key] = updated_lock_data
-                except Exception as e:
-                    logger.warning("Failed to update lock, using fallback", error=str(e))
-                    self._fallback_locks[lock_key] = updated_lock_data
-
-                return {
-                    "action": "lock_updated_cancel_and_reprocess",
-                    "should_call_ai": True,
-                    "should_cancel_previous": True,
-                    "previous_ai_job_id": existing_lock.get("ai_job_id"),
-                    "consolidated_message_count": updated_lock_data["consolidated_count"],
-                    "lock_data": {
-                        "lock_id": updated_lock_data["lock_id"],
-                        "conversation_id": conversation_id,
-                        "updated": True
-                    }
-                }
+                return await self._handle_existing_lock(existing_lock, conversation_id, history, lock_key)
             else:
-                # No existing lock - acquire new lock
-                new_lock_id = str(uuid.uuid4())
-                lock_data = {
-                    "conversation_id": conversation_id,
-                    "history_hash": hash(history),
-                    "created_at": time.time(),
-                    "lock_id": new_lock_id,
-                    "consolidated_count": 1
-                }
-
-                try:
-                    if self.redis:
-                        # Try to acquire lock via Redis
-                        lock_acquired = await self.redis.set(
-                            lock_key,
-                            json.dumps(lock_data),
-                            ex=self.lock_ttl,
-                            nx=True
-                        )
-                    else:
-                        # Fallback to in-memory locks for testing
-                        self._fallback_locks[lock_key] = lock_data
-                        lock_acquired = True
-                except Exception as e:
-                    logger.warning("Redis operation failed, using fallback", error=str(e))
-                    # Fallback to in-memory locks
-                    self._fallback_locks[lock_key] = lock_data
-                    lock_acquired = True
-
-                if lock_acquired:
-                    return {
-                        "action": "lock_acquired",
-                        "should_call_ai": True,
-                        "should_cancel_previous": False,
-                        "consolidated_message_count": 1,
-                        "lock_data": {
-                            "lock_id": new_lock_id,
-                            "conversation_id": conversation_id,
-                            "updated": False
-                        }
-                    }
-                else:
-                    # This shouldn't happen given our logic above, but just in case
-                    return {
-                        "action": "lock_exists",
-                        "should_call_ai": False,
-                        "should_cancel_previous": False,
-                        "consolidated_message_count": 0,
-                        "lock_data": None
-                    }
+                return await self._acquire_new_lock(conversation_id, history, lock_key)
 
         except Exception as e:
             logger.error("Error in lock check and acquire", error=str(e))
-            # On error, try to acquire a simple lock
-            new_lock_id = str(uuid.uuid4())
-            fallback_lock_data = {
-                "conversation_id": conversation_id,
-                "history_hash": hash(history),
-                "created_at": time.time(),
-                "lock_id": new_lock_id,
-                "consolidated_count": 1,
-                "error_fallback": True
-            }
-            self._fallback_locks[lock_key] = fallback_lock_data
+            return await self._create_fallback_lock(conversation_id, history, lock_key)
 
+    async def _handle_existing_lock(
+        self,
+        existing_lock: LockData,
+        conversation_id: str,
+        history: str,
+        lock_key: str
+    ) -> Dict[str, Any]:
+        """Handle existing lock found."""
+        logger.info("Existing lock found, cancelling current job and reprocessing",
+                   conversation_id=conversation_id,
+                   existing_ai_job_id=existing_lock.ai_job_id)
+
+        updated_lock = LockData(
+            conversation_id=conversation_id,
+            history_hash=hash(history),
+            created_at=existing_lock.created_at,
+            updated_at=time.time(),
+            lock_id=existing_lock.lock_id,
+            previous_ai_job_id=existing_lock.ai_job_id,
+            consolidated_count=existing_lock.consolidated_count + 1
+        )
+
+        await self.cache.set_json(lock_key, updated_lock.to_dict(), LOCK_TTL_SECONDS)
+
+        return {
+            "action": "lock_updated_cancel_and_reprocess",
+            "should_call_ai": True,
+            "should_cancel_previous": True,
+            "previous_ai_job_id": existing_lock.ai_job_id,
+            "consolidated_message_count": updated_lock.consolidated_count,
+            "lock_data": {
+                "lock_id": updated_lock.lock_id,
+                "conversation_id": conversation_id,
+                "updated": True
+            }
+        }
+
+    async def _acquire_new_lock(self, conversation_id: str, history: str, lock_key: str) -> Dict[str, Any]:
+        """Acquire new lock."""
+        new_lock = LockData(
+            conversation_id=conversation_id,
+            history_hash=hash(history),
+            created_at=time.time(),
+            lock_id=LockData.generate_lock_id(),
+            consolidated_count=1
+        )
+
+        success = await self.cache.set_json(lock_key, new_lock.to_dict(), LOCK_TTL_SECONDS)
+
+        if success:
             return {
-                "action": "lock_acquired_fallback",
+                "action": "lock_acquired",
                 "should_call_ai": True,
                 "should_cancel_previous": False,
                 "consolidated_message_count": 1,
                 "lock_data": {
-                    "lock_id": new_lock_id,
+                    "lock_id": new_lock.lock_id,
                     "conversation_id": conversation_id,
                     "updated": False
                 }
             }
+        else:
+            return {
+                "action": "lock_exists",
+                "should_call_ai": False,
+                "should_cancel_previous": False,
+                "consolidated_message_count": 0,
+                "lock_data": None
+            }
+
+    async def _create_fallback_lock(self, conversation_id: str, history: str, lock_key: str) -> Dict[str, Any]:
+        """Create fallback lock on error."""
+        fallback_lock = LockData(
+            conversation_id=conversation_id,
+            history_hash=hash(history),
+            created_at=time.time(),
+            lock_id=LockData.generate_lock_id(),
+            consolidated_count=1
+        )
+
+        await self.cache.set_json(lock_key, fallback_lock.to_dict(), LOCK_TTL_SECONDS)
+
+        return {
+            "action": "lock_acquired_fallback",
+            "should_call_ai": True,
+            "should_cancel_previous": False,
+            "consolidated_message_count": 1,
+            "lock_data": {
+                "lock_id": fallback_lock.lock_id,
+                "conversation_id": conversation_id,
+                "updated": False
+            }
+        }
 
     async def release_lock(self, conversation_id: str) -> bool:
-        """Release conversation lock"""
+        """Release conversation lock."""
         lock_key = f"{self.lock_prefix}{conversation_id}"
-        try:
-            if self.redis:
-                result = await self.redis.delete(lock_key)
-                return bool(result)
-            else:
-                # Fallback to in-memory locks
-                return self._fallback_locks.pop(lock_key, None) is not None
-        except Exception as e:
-            logger.warning("Redis delete failed, using fallback", error=str(e))
-            return self._fallback_locks.pop(lock_key, None) is not None
+        return await self.cache.delete(lock_key)
 
-    async def get_lock_info(self, conversation_id: str) -> Optional[Dict]:
-        """Get lock information for conversation"""
+    async def get_lock_info(self, conversation_id: str) -> Optional[LockData]:
+        """Get lock information for conversation."""
         lock_key = f"{self.lock_prefix}{conversation_id}"
-        try:
-            if self.redis:
-                lock_data = await self.redis.get(lock_key)
-                if lock_data:
-                    try:
-                        return json.loads(lock_data)
-                    except json.JSONDecodeError:
-                        return None
-            else:
-                # Fallback to in-memory locks
-                return self._fallback_locks.get(lock_key)
-        except Exception as e:
-            logger.warning("Redis get failed, using fallback", error=str(e))
-            return self._fallback_locks.get(lock_key)
-        return None
+        lock_data = await self.cache.get_json(lock_key)
+        return LockData.from_dict(lock_data) if lock_data else None
 
-    async def update_lock_with_ai_job(self, conversation_id: str, ai_job_id: str):
-        """Update lock with AI job ID"""
+    async def update_lock_with_ai_job(self, conversation_id: str, ai_job_id: str) -> bool:
+        """Update lock with AI job ID."""
         lock_key = f"{self.lock_prefix}{conversation_id}"
+
         try:
-            if self.redis:
-                lock_data = await self.redis.get(lock_key)
-                if lock_data:
-                    try:
-                        data = json.loads(lock_data)
-                        data["ai_job_id"] = ai_job_id
-                        await self.redis.set(lock_key, json.dumps(data), ex=self.lock_ttl)
-                    except json.JSONDecodeError:
-                        pass
-            else:
-                # Fallback to in-memory locks
-                if lock_key in self._fallback_locks:
-                    self._fallback_locks[lock_key]["ai_job_id"] = ai_job_id
+            lock_data = await self.cache.get_json(lock_key)
+            if lock_data:
+                lock = LockData.from_dict(lock_data)
+                lock.ai_job_id = ai_job_id
+                lock.updated_at = time.time()
+                return await self.cache.set_json(lock_key, lock.to_dict(), LOCK_TTL_SECONDS)
+            return False
         except Exception as e:
-            logger.warning("Redis update failed, using fallback", error=str(e))
-            if lock_key in self._fallback_locks:
-                self._fallback_locks[lock_key]["ai_job_id"] = ai_job_id
+            logger.warning("Failed to update lock with AI job", error=str(e))
+            return False
 
 
 class BackgroundJobManager:
-    """Simple background job manager for AI processing"""
+    """Enhanced background job manager with proper abstractions."""
 
-    def __init__(self, parent_handler=None):
-        self.redis = None
+    def __init__(self, cache_manager: CacheManager, parent_handler=None):
+        self.cache = cache_manager
         self.job_prefix = "ai_job:"
-        self.job_ttl = 3600  # 1 hour
-        self._fallback_jobs = {}  # In-memory fallback for testing
+        self.parent_handler = parent_handler
         self._worker_task = None
         self._worker_running = False
         self._processing_queue = asyncio.Queue()
-        self.parent_handler = parent_handler  # Reference to parent MessageHandler
-
-    async def initialize(self):
-        """Initialize job manager"""
-        try:
-            self.redis = await get_redis_client()
-            logger.info("Background job manager initialized with Redis")
-        except Exception as e:
-            logger.warning("Redis connection failed, using fallback", error=str(e))
-            self.redis = None
-            logger.info("Background job manager initialized with fallback")
 
     async def create_ai_processing_job(self, payload: Dict[str, Any]) -> str:
-        """Create an AI processing job"""
+        """Create an AI processing job."""
         job_id = str(time.time())
+
+        job = JobData(
+            job_id=job_id,
+            status="pending",
+            created_at=time.time(),
+            payload=payload
+        )
+
         job_key = f"{self.job_prefix}{job_id}"
+        await self.cache.set_json(job_key, job.to_dict(), JOB_TTL_SECONDS)
 
-        job_data = {
-            "job_id": job_id,
-            "status": "pending",
-            "created_at": time.time(),
-            "payload": payload
-        }
-
-        try:
-            if self.redis:
-                await self.redis.set(job_key, json.dumps(job_data), ex=self.job_ttl)
-            else:
-                # Fallback to in-memory storage
-                self._fallback_jobs[job_key] = job_data
-        except Exception as e:
-            logger.warning("Redis job creation failed, using fallback", error=str(e))
-            self._fallback_jobs[job_key] = job_data
-
-        # Queue the job for processing by background worker
-        if self._worker_running:
-            await self._queue_job_for_processing(job_id)
-        else:
-            # Fallback: process immediately if worker not running
-            logger.warning("Background worker not running, processing job immediately", job_id=job_id)
-            asyncio.create_task(self._process_ai_job(job_id))
-
+        # Queue the job for processing
+        await self._queue_job_for_processing(job_id)
         return job_id
 
-    async def _process_ai_job(self, job_id: str):
-        """Process AI job using real AI service"""
+    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
+        """Get job status."""
+        job_key = f"{self.job_prefix}{job_id}"
+        job_data = await self.cache.get_json(job_key)
+
+        if job_data:
+            return job_data
+
+        return {
+            "job_id": job_id,
+            "status": "not_found",
+            "error": "Job not found"
+        }
+
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a job."""
+        try:
+            await self._update_job_status(job_id, "cancelled", {
+                "cancelled_at": time.time(),
+                "reason": "cancelled_by_user"
+            })
+            logger.info("Job cancelled successfully", job_id=job_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to cancel job", job_id=job_id, error=str(e))
+            return False
+
+    async def _update_job_status(self, job_id: str, status: str, additional_data: Dict = None):
+        """Update job status."""
         job_key = f"{self.job_prefix}{job_id}"
 
-        # Check if job was cancelled before we even start processing
+        try:
+            job_data = await self.cache.get_json(job_key)
+            if job_data:
+                job = JobData.from_dict(job_data)
+                job.status = status
+                job.updated_at = time.time()
+
+                if additional_data:
+                    # Update the job data dict directly for additional fields
+                    job_dict = job.to_dict()
+                    job_dict.update(additional_data)
+                    await self.cache.set_json(job_key, job_dict, JOB_TTL_SECONDS)
+                else:
+                    await self.cache.set_json(job_key, job.to_dict(), JOB_TTL_SECONDS)
+
+                logger.info("Job status updated",
+                           job_id=job_id,
+                           status=status,
+                           additional_data=additional_data)
+        except Exception as e:
+            logger.warning("Failed to update job status", job_id=job_id, error=str(e))
+
+    async def _check_job_cancellation(self, job_id: str) -> bool:
+        """Check if a job has been cancelled."""
+        try:
+            job_status = await self.get_job_status(job_id)
+            return job_status.get("status") == "cancelled"
+        except Exception as e:
+            logger.warning("Failed to check job cancellation status", job_id=job_id, error=str(e))
+            return False
+
+    async def _process_ai_job(self, job_id: str):
+        """Process AI job using real AI service."""
+        job_key = f"{self.job_prefix}{job_id}"
+
+        # Check if job was cancelled before processing
         if await self._check_job_cancellation(job_id):
             logger.info("Job was cancelled before processing started", job_id=job_id)
             return
@@ -293,15 +540,8 @@ class BackgroundJobManager:
         })
 
         try:
-            # Get job data to extract payload
-            job_data = None
-            if self.redis:
-                data = await self.redis.get(job_key)
-                if data:
-                    job_data = json.loads(data)
-            else:
-                job_data = self._fallback_jobs.get(job_key)
-
+            # Get job data
+            job_data = await self.cache.get_json(job_key)
             if not job_data:
                 await self._update_job_status(job_id, "failed", {
                     "error": "Job data not found",
@@ -309,275 +549,237 @@ class BackgroundJobManager:
                 })
                 return
 
-            # Check for cancellation again after fetching job data
+            # Check for cancellation after fetching job data
             if await self._check_job_cancellation(job_id):
                 logger.info("Job was cancelled during data fetching", job_id=job_id)
                 return
 
-            payload = job_data.get("payload", {})
-            conversation_id = payload.get("conversation_id")
-            platform_conversation_id = payload.get("platform_conversation_id", "")
-            messages = payload.get("messages", [])
-            bot_config = payload.get("bot_config", {})
-            ai_config = payload.get("ai_config", {})
-            platform_config = payload.get("platform_config", {})
-            resources = payload.get("resources", {})
-            lock_id = payload.get("lock_id", "")
+            # Process the job
+            result = await self._execute_ai_processing(job_id, job_data)
 
-            # Get AI service instance
-            ai_service = get_ai_service()
-            platform_client = get_platform_client()
-
-            # Final check for cancellation before starting AI processing
-            if await self._check_job_cancellation(job_id):
-                logger.info("Job was cancelled before AI processing", job_id=job_id)
-                return
-
-            # Process the job using real AI service with message array
-            ai_result = await ai_service.process_job(
-                job_id=job_id,
-                conversation_id=conversation_id,
-                messages=messages,  # Pass messages array directly
-                context={
-                    "bot_config": bot_config,
-                    "ai_config": ai_config,
-                    "resources": resources,
-                    "lock_id": lock_id
-                },
-                core_ai_id=ai_config.get("core_ai_id")
-            )
-
-            # Check if job was cancelled during AI processing
-            if await self._check_job_cancellation(job_id):
-                logger.info("Job was cancelled during AI processing",
-                           job_id=job_id,
-                           conversation_id=conversation_id)
-                return
-
-            # Update status based on AI processing result
-            if ai_result.get("success"):
-                await self._update_job_status(job_id, "completed", {
-                    "ai_response": ai_result.get("data", {}),
-                    "ai_action": ai_result.get("action", ""),
-                    "processing_time_ms": ai_result.get("processing_time_ms"),
-                    "conversation_turns": ai_result.get("conversation_turns", 0),
-                    "completed_at": time.time()
-                })
-                logger.info("AI job completed successfully",
-                           job_id=job_id,
-                           conversation_id=conversation_id,
-                           ai_action=ai_result.get("action", ""),
-                           conversation_turns=ai_result.get("conversation_turns"))
-
-                ai_action = ai_result.get("action", "")
-                ai_response = ai_result.get("data", {})
-
-                if ai_action == "OUT_OF_SCOPE":
-                    ai_action = "NOTIFY"
-
-                # Implement platform history check and action execution
-                try:
-                    # Get the platform configuration for this job
-                    platform_id = platform_config.get("id")
-
-                    logger.info("Starting platform history validation",
-                               job_id=job_id,
-                               conversation_id=conversation_id,
-                               platform_id=platform_id)
-
-                    latest_history = await platform_client.get_conversation_history(
-                        conversation_id=platform_conversation_id,
-                        platform_config=platform_config
-                    )
-
-                    new_history = latest_history.get("history", "")
-                    old_history = await self.parent_handler._get_cached_history(conversation_id)
-
-                    print("========== HISTORY ==========")
-                    print("new_history")
-                    print(json.dumps(new_history, indent=4))
-                    print("old_history")
-                    print(json.dumps(old_history, indent=4))
-                    print("========== HISTORY ==========")
-
-                    if len(new_history) > len(old_history):
-                        print("========== CHUNK HISTORY ==========")
-                        resources = latest_history.get("resources", {})
-                        await self.parent_handler._set_cached_history(conversation_id, new_history)
-                        # await self.parent_handler._set_history_in_db(conversation_id, new_history)
-                        await self.parent_handler.handle_message_request(
-                            conversation_id=conversation_id,
-                            bot_id=bot_config.get("bot_id"),
-                            history=new_history,
-                            resources=resources
-                        )
-
-                        logger.info("Platform history updated, proceeding with message request",
-                                    job_id=job_id,
-                                    conversation_id=conversation_id)
-
-                        return
-
-                    logger.info("Proceeding with platform action execution",
-                               job_id=job_id,
-                               conversation_id=platform_conversation_id)
-
-                    # Execute the AI action through platform
-                    await self.parent_handler._execute_platform_action(
-                        ai_action, ai_response, platform_conversation_id, platform_config, job_id, platform_client
-                    )
-
-                except Exception as e:
-                    logger.error("Error during platform action execution",
-                               job_id=job_id,
-                               conversation_id=conversation_id,
-                               error=str(e))
-                    # Mark job as completed but with error in platform action
-                    await self._update_job_status(job_id, "completed_with_error", {
-                        "ai_action": ai_action,
-                        "platform_error": str(e),
-                        "completed_at": time.time()
-                    })
-
-            else:
-                await self._update_job_status(job_id, "failed", {
-                    "error": ai_result.get("error", "AI processing failed"),
-                    "ai_action": ai_result.get("action", ""),
-                    "processing_time_ms": ai_result.get("processing_time_ms"),
-                    "completed_at": time.time()
-                })
-                logger.error("AI job failed",
-                            job_id=job_id,
-                            conversation_id=conversation_id,
-                            error=ai_result.get("error"))
+            if not await self._check_job_cancellation(job_id):
+                await self._handle_ai_result(job_id, job_data, result)
 
         except Exception as e:
-            # Check if the exception was due to cancellation
-            if await self._check_job_cancellation(job_id):
-                logger.info("Job was cancelled during exception handling", job_id=job_id)
-                return
+            if not await self._check_job_cancellation(job_id):
+                logger.error("AI job processing error", job_id=job_id, error=str(e))
+                await self._update_job_status(job_id, "failed", {
+                    "error": f"Job processing exception: {str(e)}",
+                    "completed_at": time.time()
+                })
 
-            logger.error("AI job processing error",
+    async def _execute_ai_processing(self, job_id: str, job_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute AI processing for the job."""
+        payload = job_data.get("payload", {})
+        conversation_id = payload.get("conversation_id")
+        messages = payload.get("messages", [])
+        bot_config = payload.get("bot_config", {})
+        ai_config = payload.get("ai_config", {})
+        resources = payload.get("resources", {})
+        lock_id = payload.get("lock_id", "")
+
+        ai_service = get_ai_service()
+
+        # Final check for cancellation before AI processing
+        if await self._check_job_cancellation(job_id):
+            logger.info("Job was cancelled before AI processing", job_id=job_id)
+            return {"success": False, "error": "Job cancelled"}
+
+        # Process with AI service
+        return await ai_service.process_job(
+            job_id=job_id,
+            conversation_id=conversation_id,
+            messages=messages,
+            context={
+                "bot_config": bot_config,
+                "ai_config": ai_config,
+                "resources": resources,
+                "lock_id": lock_id
+            },
+            core_ai_id=ai_config.get("core_ai_id")
+        )
+
+    async def _handle_ai_result(self, job_id: str, job_data: Dict[str, Any], ai_result: Dict[str, Any]):
+        """Handle AI processing result."""
+        if ai_result.get("success"):
+            await self._handle_successful_ai_result(job_id, job_data, ai_result)
+        else:
+            await self._handle_failed_ai_result(job_id, ai_result)
+
+    async def _handle_successful_ai_result(self, job_id: str, job_data: Dict[str, Any], ai_result: Dict[str, Any]):
+        """Handle successful AI processing result."""
+        payload = job_data.get("payload", {})
+        conversation_id = payload.get("conversation_id")
+        platform_conversation_id = payload.get("platform_conversation_id", "")
+        platform_config = payload.get("platform_config", {})
+
+        # First, update job status to completed
+        await self._update_job_status(job_id, "completed", {
+            "ai_response": ai_result.get("data", {}),
+            "ai_action": ai_result.get("action", ""),
+            "processing_time_ms": ai_result.get("processing_time_ms"),
+            "conversation_turns": ai_result.get("conversation_turns", 0),
+            "completed_at": time.time()
+        })
+
+        logger.info("AI job completed successfully",
+                   job_id=job_id,
+                   conversation_id=conversation_id,
+                   ai_action=ai_result.get("action", ""))
+
+        # Note: History saving and lock removal now happens in platform actions before execution
+
+        # Now execute platform actions (which will save history and remove lock first)
+        logger.info("Starting platform actions - will save history and remove lock first",
+                   job_id=job_id,
+                   conversation_id=conversation_id,
+                   ai_action=ai_result.get("action", ""))
+
+        await self._handle_platform_actions(job_id, conversation_id, platform_conversation_id,
+                                           platform_config, ai_result)
+
+    async def _handle_failed_ai_result(self, job_id: str, ai_result: Dict[str, Any]):
+        """Handle failed AI processing result."""
+        await self._update_job_status(job_id, "failed", {
+            "error": ai_result.get("error", "AI processing failed"),
+            "ai_action": ai_result.get("action", ""),
+            "processing_time_ms": ai_result.get("processing_time_ms"),
+            "completed_at": time.time()
+        })
+        logger.error("AI job failed", job_id=job_id, error=ai_result.get("error"))
+
+        # For failed processing, keep the lock active to allow conversation continuation
+        try:
+            # Extract conversation_id from job data if available
+            job_data = await self.cache.get_json(f"{self.job_prefix}{job_id}")
+            if job_data:
+                payload = job_data.get("payload", {})
+                conversation_id = payload.get("conversation_id")
+                if conversation_id:
+                    await self._update_lock_for_continuation(conversation_id, job_id, ai_result)
+                    logger.info("Lock updated for conversation continuation after failed AI processing",
+                               job_id=job_id,
+                               conversation_id=conversation_id)
+                else:
+                    logger.warning("No conversation_id found in job payload for lock update",
+                                 job_id=job_id)
+            else:
+                logger.warning("No job data found for lock update",
+                             job_id=job_id)
+        except Exception as e:
+            logger.error("Failed to update lock for continuation after failure",
                         job_id=job_id,
                         error=str(e))
-            await self._update_job_status(job_id, "failed", {
-                "error": f"Job processing exception: {str(e)}",
+
+    async def _handle_platform_actions(
+        self,
+        job_id: str,
+        conversation_id: str,
+        platform_conversation_id: str,
+        platform_config: Dict[str, Any],
+        ai_result: Dict[str, Any]
+    ):
+        """Handle platform actions after AI processing."""
+        try:
+            ai_action = ai_result.get("action", "")
+            ai_response = ai_result.get("data", {})
+
+            if ai_action == "OUT_OF_SCOPE":
+                ai_action = "NOTIFY"
+
+            platform_client = get_platform_client()
+            platform_id = platform_config.get("id")
+
+            logger.info("Starting platform history validation",
+                       job_id=job_id,
+                       conversation_id=conversation_id,
+                       platform_id=platform_id)
+
+            # Check for history updates
+            latest_history = await platform_client.get_conversation_history(
+                conversation_id=platform_conversation_id,
+                platform_config=platform_config
+            )
+
+            new_history = latest_history.get("history", "")
+            old_history = await self.parent_handler._get_cached_history(conversation_id)
+
+            if len(new_history) > len(old_history):
+                # Handle updated history
+                await self._handle_history_update(job_id, conversation_id, new_history, latest_history)
+                return
+
+            # Here , save history to database
+            try:
+                await self.parent_handler._save_history_to_database_from_platform(conversation_id)
+                logger.info("History saved to database before platform action execution",
+                           job_id=job_id,
+                           conversation_id=conversation_id,
+                           ai_action=ai_action)
+            except Exception as e:
+                logger.error("Failed to save history to database before platform actions",
+                            job_id=job_id,
+                            conversation_id=conversation_id,
+                            error=str(e))
+
+            # Remove lock after saving history (before platform actions)
+            try:
+                await self.parent_handler._remove_lock_from_platform_actions(conversation_id, job_id, ai_action)
+                logger.info("Lock removed before platform action execution",
+                           job_id=job_id,
+                           conversation_id=conversation_id,
+                           ai_action=ai_action)
+            except Exception as e:
+                logger.error("Failed to remove lock before platform actions",
+                            job_id=job_id,
+                            conversation_id=conversation_id,
+                            error=str(e))
+
+            # Execute platform action
+            await self.parent_handler._execute_platform_action(
+                ai_action, ai_response, platform_conversation_id, platform_config, job_id, platform_client
+            )
+
+        except Exception as e:
+            logger.error("Error during platform action execution",
+                       job_id=job_id,
+                       conversation_id=conversation_id,
+                       error=str(e))
+            await self._update_job_status(job_id, "completed_with_error", {
+                "ai_action": ai_action,
+                "platform_error": str(e),
                 "completed_at": time.time()
             })
 
-    async def _update_job_status(self, job_id: str, status: str, additional_data: Dict = None):
-        """Update job status"""
-        job_key = f"{self.job_prefix}{job_id}"
+    async def _handle_history_update(
+        self,
+        job_id: str,
+        conversation_id: str,
+        new_history: str,
+        latest_history: Dict[str, Any]
+    ):
+        """Handle platform history update."""
+        logger.info("Platform history updated, proceeding with message request",
+                   job_id=job_id,
+                   conversation_id=conversation_id)
 
-        try:
-            if self.redis:
-                job_data = await self.redis.get(job_key)
-                if job_data:
-                    try:
-                        data = json.loads(job_data)
-                        data["status"] = status
-                        data["updated_at"] = time.time()
-                        if additional_data:
-                            data.update(additional_data)
-                        await self.redis.set(job_key, json.dumps(data), ex=self.job_ttl)
-                    except json.JSONDecodeError:
-                        pass
-            else:
-                # Fallback to in-memory storage
-                if job_key in self._fallback_jobs:
-                    data = self._fallback_jobs[job_key]
-                    data["status"] = status
-                    data["updated_at"] = time.time()
-                    if additional_data:
-                        data.update(additional_data)
+        resources = latest_history.get("resources", {})
+        await self.parent_handler._set_cached_history(conversation_id, new_history)
 
-            logger.info("Job status updated",
-                       job_id=job_id,
-                       status=status,
-                       additional_data=additional_data)
-
-        except Exception as e:
-            logger.warning("Redis job update failed, using fallback", error=str(e))
-            if job_key in self._fallback_jobs:
-                data = self._fallback_jobs[job_key]
-                data["status"] = status
-                data["updated_at"] = time.time()
-                if additional_data:
-                    data.update(additional_data)
-
-    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
-        """Get job status"""
-        job_key = f"{self.job_prefix}{job_id}"
-
-        try:
-            if self.redis:
-                job_data = await self.redis.get(job_key)
-                if job_data:
-                    try:
-                        return json.loads(job_data)
-                    except json.JSONDecodeError:
-                        pass
-            else:
-                # Fallback to in-memory storage
-                return self._fallback_jobs.get(job_key, {
-                    "job_id": job_id,
-                    "status": "not_found",
-                    "error": "Job not found"
-                })
-        except Exception as e:
-            logger.warning("Redis job status failed, using fallback", error=str(e))
-            return self._fallback_jobs.get(job_key, {
-                "job_id": job_id,
-                "status": "not_found",
-                "error": "Job not found"
-            })
-
-        return {
-            "job_id": job_id,
-            "status": "not_found",
-            "error": "Job not found"
-        }
-
-    async def cancel_job(self, job_id: str) -> bool:
-        """Cancel a job"""
-        try:
-            # First update the job status to cancelled
-            await self._update_job_status(job_id, "cancelled", {
-                "cancelled_at": time.time(),
-                "reason": "cancelled_by_user"
-            })
-
-            logger.info("Job cancelled successfully", job_id=job_id)
-            return True
-
-        except Exception as e:
-            logger.error("Failed to cancel job", job_id=job_id, error=str(e))
-            return False
-
-    async def _check_job_cancellation(self, job_id: str) -> bool:
-        """Check if a job has been cancelled"""
-        try:
-            job_status = await self.get_job_status(job_id)
-            return job_status.get("status") == "cancelled"
-        except Exception as e:
-            logger.warning("Failed to check job cancellation status", job_id=job_id, error=str(e))
-            return False
-
-    async def get_worker_status(self) -> Dict[str, Any]:
-        """Get worker status"""
-        return {
-            "redis_connected": bool(self.redis),
-            "worker_running": self._worker_running,
-            "worker_task_active": bool(self._worker_task and not self._worker_task.done()),
-            "queue_size": self._processing_queue.qsize(),
-            "fallback_jobs": len(self._fallback_jobs) if not self.redis else 0,
-            "status": "healthy" if self._worker_running else "stopped"
-        }
+        # Trigger new message handling
+        bot_config = await self.parent_handler.bot_config_service.get_bot_config(conversation_id)
+        await self.parent_handler.handle_message_request(
+            conversation_id=conversation_id,
+            bot_id=bot_config.get("bot_id"),
+            history=new_history,
+            resources=resources
+        )
 
     async def start_background_worker(self):
-        """Start background worker"""
+        """Start background worker."""
         if self._worker_running:
             logger.warning("Background worker already running")
+            logger.info("Background worker already running")
             return
 
         self._worker_running = True
@@ -585,7 +787,7 @@ class BackgroundJobManager:
         logger.info("Background worker started")
 
     async def stop_background_worker(self):
-        """Stop background worker"""
+        """Stop background worker."""
         if not self._worker_running:
             logger.warning("Background worker not running")
             return
@@ -594,7 +796,6 @@ class BackgroundJobManager:
 
         if self._worker_task:
             try:
-                # Cancel the worker task
                 self._worker_task.cancel()
                 await self._worker_task
             except asyncio.CancelledError:
@@ -607,52 +808,68 @@ class BackgroundJobManager:
         logger.info("Background worker stopped")
 
     async def _worker_loop(self):
-        """Main worker loop that processes jobs from the queue"""
+        """Main worker loop that processes jobs from the queue."""
         logger.info("Background worker loop started")
 
         while self._worker_running:
             try:
-                # Wait for job with timeout to allow periodic health checks
-                try:
-                    job_id = await asyncio.wait_for(
-                        self._processing_queue.get(),
-                        timeout=10.0
-                    )
+                job_id = await asyncio.wait_for(
+                    self._processing_queue.get(),
+                    timeout=WORKER_TIMEOUT_SECONDS
+                )
 
-                    if job_id:
-                        logger.debug("Processing job from queue", job_id=job_id)
-                        await self._process_ai_job(job_id)
-                        self._processing_queue.task_done()
+                if job_id:
+                    await self._process_ai_job(job_id)
+                    self._processing_queue.task_done()
 
-                except asyncio.TimeoutError:
-                    # Timeout is normal, continue the loop
-                    continue
-
+            except asyncio.TimeoutError:
+                continue
             except asyncio.CancelledError:
                 logger.info("Worker loop cancelled")
                 break
             except Exception as e:
                 logger.error("Error in worker loop", error=str(e))
-                # Continue running despite errors
                 await asyncio.sleep(1)
 
         logger.info("Background worker loop stopped")
 
     async def _queue_job_for_processing(self, job_id: str):
-        """Queue a job for background processing"""
+        """Queue a job for background processing."""
         try:
-            await self._processing_queue.put(job_id)
-            logger.debug("Job queued for processing", job_id=job_id)
+            if self._worker_running:
+                await self._processing_queue.put(job_id)
+            else:
+                # Auto-start worker if not running (self-healing)
+                logger.warning("Background worker not running, attempting to start it", job_id=job_id)
+                try:
+                    await self.start_background_worker()
+                    if self._worker_running:
+                        await self._processing_queue.put(job_id)
+                        logger.info("Background worker restarted and job queued", job_id=job_id)
+                    else:
+                        logger.error("Failed to restart background worker, processing job immediately", job_id=job_id)
+                        asyncio.create_task(self._process_ai_job(job_id))
+                except Exception as worker_start_error:
+                    logger.error("Failed to start background worker",
+                               job_id=job_id,
+                               error=str(worker_start_error))
+                    asyncio.create_task(self._process_ai_job(job_id))
         except Exception as e:
             logger.error("Failed to queue job", job_id=job_id, error=str(e))
-            # If queueing fails, process immediately as fallback
             asyncio.create_task(self._process_ai_job(job_id))
 
-    async def close(self):
-        """Close job manager"""
-        logger.info("Closing background job manager")
+    async def get_worker_status(self) -> Dict[str, Any]:
+        """Get worker status."""
+        return {
+            "worker_running": self._worker_running,
+            "worker_task_active": bool(self._worker_task and not self._worker_task.done()),
+            "queue_size": self._processing_queue.qsize(),
+            "status": "healthy" if self._worker_running else "stopped"
+        }
 
-        # Stop the worker
+    async def close(self):
+        """Close job manager."""
+        logger.info("Closing background job manager")
         await self.stop_background_worker()
 
         # Clear any remaining jobs in queue
@@ -667,22 +884,19 @@ class BackgroundJobManager:
 
 
 class BotConfigService:
-    """Service for retrieving bot configuration"""
+    """Service for retrieving bot configuration."""
 
     async def get_bot_config(self, section_id: str) -> Dict[str, Any]:
-        """Get bot configuration for conversation"""
+        """Get bot configuration for conversation."""
         try:
             async with async_session_factory() as session:
                 conversation_crud = ConversationCRUD(session)
                 bot_crud = BotCRUD(session)
 
-                # Get conversation to find bot_id
                 conversation = await conversation_crud.get_by_id(section_id)
                 if not conversation:
-                    # Return default bot config if conversation not found
                     return await self._get_default_bot_config()
 
-                # Get bot configuration
                 bot = await bot_crud.get_by_id(conversation.bot_id)
                 if not bot:
                     return await self._get_default_bot_config()
@@ -702,7 +916,7 @@ class BotConfigService:
             return await self._get_default_bot_config()
 
     async def _get_default_bot_config(self) -> Dict[str, Any]:
-        """Get default bot configuration"""
+        """Get default bot configuration."""
         return {
             "bot_id": "default",
             "name": "Default Bot",
@@ -715,228 +929,142 @@ class BotConfigService:
         }
 
 
-class MessageHandler:
-    """Enhanced MessageHandler for production use with Redis state management"""
+class HistoryProcessor:
+    """Handles history processing operations."""
 
-    def __init__(self):
-        self.redis = None
-        self.lock_manager = None
-        self.bot_config_service = BotConfigService()
-        self.background_job_manager = None  # Will be set after initialization
-        self._initialized = False
+    def __init__(self, cache_manager: CacheManager):
+        self.cache = cache_manager
+        self.history_cache_prefix = "processed_history:"
 
-    async def initialize(self):
-        """Initialize all components"""
-        if self._initialized:
-            return
-
+    async def cut_old_history(self, section_id: str, current_history: str) -> str:
+        """Cut old history from new history and return only the new part."""
         try:
-            # Try to get Redis connection
-            try:
-                self.redis = await get_redis_client()
-                logger.info("MessageHandler Redis connection established")
-            except Exception as redis_error:
-                logger.warning("Redis connection failed, continuing without Redis", error=str(redis_error))
-                self.redis = None
-
-            # Initialize components with Redis (or None for fallback)
-            self.lock_manager = MessageLockManager(self.redis)
-            self.background_job_manager = BackgroundJobManager(self)
-            await self.background_job_manager.initialize()
-
-            self._initialized = True
-            logger.info("Enhanced message handler initialized successfully",
-                       redis_available=bool(self.redis))
-        except Exception as e:
-            logger.error("Failed to initialize message handler", error=str(e))
-            # Don't raise the exception, allow the handler to work in degraded mode
-            self._initialized = True
-
-    async def handle_message_request(
-        self,
-        conversation_id: str,
-        bot_id: str,
-        history: str,
-        resources: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Main entry point for message handling with lock management and AI processing
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        logger.info("Handling message request",
-                   bot_id=bot_id,
-                   conversation_id=conversation_id,
-                   history_length=len(history)
-                   )
-
-        # Get conversation by conversation ID
-        async with async_session_factory() as session:
-            conversation_crud = ConversationCRUD(session)
-            conversation = await conversation_crud.get_by_conversation_id(conversation_id)
-            if not conversation:
-                conversation = await conversation_crud.create_conversation_by_bot_and_conversation_id(uuid.UUID(bot_id), conversation_id)
-            section_id = str(conversation.id)
-
-        try:
-            # Step 1: Cut old history from new history to get only new part for processing
-            effective_history = await self._cut_old_history(section_id, history)
-            print("========== EFFECTIVE HISTORY ==========")
-            print(json.dumps(effective_history, indent=4))
-            print("========== EFFECTIVE HISTORY ==========")
-            if len(effective_history) != len(history):
-                logger.info("Cut old history from new history",
-                           section_id=section_id,
-                           original_length=len(history),
-                           effective_length=len(effective_history),
-                           cut_amount=len(history) - len(effective_history))
-            # if len(effective_history) == 0:
-            #     return {
-            #         "success": True,
-            #         "status": "no_history",
-            #         "message": "No history to process"
-            #     }
-
-            # Step 2: Get bot configuration
-            bot_config = await self.bot_config_service.get_bot_config(section_id)
-            logger.info("Bot config retrieved", bot_name=bot_config.get("name"))
-
-            # Step 3: Get AI core configuration
-            ai_config = await self._get_ai_config(bot_config.get("core_ai_id"))
-
-            # Step 4: Get platform configuration
-            platform_config = await self._get_platform_config(bot_config.get("platform_id"))
-
-            # Step 5: Parse the effective (new) history into structured messages
-            parsed_messages = await self._parse_history(
-                effective_history,
-                conversation_id=section_id
-            )
-            # Step 6: Check lock and consolidate messages if needed
-            lock_result = await self.lock_manager.check_and_acquire_lock(
-                conversation_id=section_id,
-                history=effective_history,  # Use effective history for lock
-                resources=resources
-            )
-            logger.info("Lock check completed",
-                       action=lock_result["action"],
-                       should_call_ai=lock_result["should_call_ai"],
-                       should_cancel_previous=lock_result.get("should_cancel_previous", False),
-                       parsed_message_count=len(parsed_messages))
-
-            # Handle job cancellation if needed
-            if lock_result.get("should_cancel_previous") and lock_result.get("previous_ai_job_id"):
-                try:
-                    await self.background_job_manager.cancel_job(lock_result["previous_ai_job_id"])
-                    logger.info("Previous AI job cancelled",
-                               cancelled_job_id=lock_result["previous_ai_job_id"],
-                               conversation_id=section_id)
-                except Exception as cancel_error:
-                    logger.warning("Failed to cancel previous job",
-                                  job_id=lock_result["previous_ai_job_id"],
-                                  error=str(cancel_error))
-
-            if lock_result["should_call_ai"]:
-                # Start AI processing with new history only
-                ai_job_id = await self._start_ai_processing(
-                    section_id=section_id,
-                    conversation_id=conversation_id,
-                    lock_data=lock_result["lock_data"],
-                    bot_config=bot_config,
-                    ai_config=ai_config,
-                    platform_config=platform_config,
-                    messages=parsed_messages,
-                    resources=resources
-                )
-
-                # Update lock with AI job ID
-                await self.lock_manager.update_lock_with_ai_job(
-                    section_id, ai_job_id
-                )
-
-                # Cache the current full history for next time
-                await self._cache_processed_history(section_id, history)
-
-                action_description = "Message received and AI processing started with new history only"
-                if lock_result.get("should_cancel_previous"):
-                    action_description = "Previous job cancelled, reprocessing with new history only"
-
-                return {
-                    "success": True,
-                    "status": "ai_processing_started",
-                    "action": lock_result["action"],
-                    "ai_job_id": ai_job_id,
-                    "lock_id": lock_result["lock_data"]["lock_id"],
-                    "consolidated_messages": len(parsed_messages),
-                    "consolidated_count": lock_result.get("consolidated_message_count", 1),
-                    "bot_name": bot_config["name"],
-                    "message": action_description,
-                    "cancelled_previous_job": lock_result.get("previous_ai_job_id"),
-                    "reprocessing": lock_result.get("should_cancel_previous", False)
-                }
-            else:
-                return {
-                    "success": True,
-                    "status": "locked",
-                    "action": lock_result["action"],
-                    "message": "Message is being processed by another request"
-                }
-
-        except Exception as e:
-            logger.error("Message handling failed",
-                        conversation_id=conversation_id,
-                        error=str(e))
-
-            # Release lock on error
-            if self.lock_manager:
-                try:
-                    await self.lock_manager.release_lock(section_id)
-                except Exception as lock_error:
-                    logger.error("Failed to release lock", error=str(lock_error))
-
-            return {
-                "success": False,
-                "status": "failed",
-                "error": str(e),
-                "message": f"Message processing failed: {str(e)}"
-            }
-
-    async def _cut_old_history(self, section_id: str, current_history: str) -> str:
-        """Cut old history from new history and return only the new part for processing"""
-        try:
-            # Step 1: Get old processed history from Redis cache first
-            old_history = await self._get_cached_history(section_id)
-            # Step 2: If no cache, get last processed history from database
+            old_history = await self.get_cached_history(section_id)
             if not old_history:
-                old_history = await self._get_processed_history(section_id)
-            # Step 3: Cut old history from current to get only new part
+                old_history = await self._get_processed_history_from_db(section_id)
+
             if old_history:
-                new_history_part = await self._cut_history(current_history, old_history)
-                logger.debug("Cut old history from current",
-                           section_id=section_id,
-                           current_length=len(current_history),
-                           old_length=len(old_history),
-                           new_part_length=len(new_history_part))
+                new_history_part = self._cut_history_string(current_history, old_history)
 
                 if len(current_history) > len(old_history):
-                    await self._set_cached_history(section_id, current_history)
-                    # await self._set_history_in_db(section_id, new_history)
+                    await self.set_cached_history(section_id, current_history)
+
                 return new_history_part
             else:
-                logger.debug("No old history found, using full history",
-                           section_id=section_id,
-                           current_length=len(current_history))
                 return current_history
 
         except Exception as e:
             logger.warning("Failed to cut old history, using full history",
-                          section_id=section_id,
-                          error=str(e))
+                          section_id=section_id, error=str(e))
             return current_history
 
-    async def _get_ai_config(self, core_ai_id: str) -> Dict[str, Any]:
-        """Get AI core configuration"""
+    async def get_cached_history(self, conversation_id: str) -> Optional[str]:
+        """Get cached processed history."""
+        try:
+            cache_key = f"{self.history_cache_prefix}{conversation_id}"
+            cached_data = await self.cache.get_json(cache_key)
+
+            if cached_data:
+                return cached_data.get("history", "")
+            return None
+
+        except Exception as e:
+            logger.warning("Failed to get cached history",
+                          conversation_id=conversation_id, error=str(e))
+            return None
+
+    async def set_cached_history(self, conversation_id: str, history: str) -> bool:
+        """Set cached history."""
+        try:
+            cache_key = f"{self.history_cache_prefix}{conversation_id}"
+            cache_data = {
+                "history": history,
+                "processed_at": time.time(),
+                "history_length": len(history)
+            }
+            return await self.cache.set_json(cache_key, cache_data, CACHE_TTL_SECONDS)
+
+        except Exception as e:
+            logger.error("Error setting cached history", error=str(e))
+            return False
+
+    async def _get_processed_history_from_db(self, conversation_id: str) -> Optional[str]:
+        """Get last processed history from database."""
+        try:
+            async with async_session_factory() as session:
+                conversation_crud = ConversationCRUD(session)
+                conversation = await conversation_crud.get_by_id_simple(uuid.UUID(conversation_id))
+
+                if conversation and conversation.history:
+                    return conversation.history
+                return None
+
+        except Exception as e:
+            logger.warning("Failed to get history from database",
+                          conversation_id=conversation_id, error=str(e))
+            return None
+
+    def _cut_history_string(self, current_history: str, old_history: str) -> str:
+        """Cut old history from current history to get only new messages."""
+        try:
+            if not old_history or old_history not in current_history:
+                return current_history
+
+            old_end_position = current_history.find(old_history) + len(old_history)
+            new_part = current_history[old_end_position:].strip()
+            return new_part
+
+        except Exception as e:
+            logger.warning("Failed to cut old history, returning all as new", error=str(e))
+            return current_history
+
+    def parse_history(self, history: str, conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Parse and chunk history into structured messages."""
+        try:
+            if not history:
+                return []
+
+            message_data = []
+            patterns = [
+                (r'<USER>(.*?)</USER>', 'user'),
+                (r'<BOT>(.*?)</BOT>', 'bot'),
+                (r'<SALE>(.*?)</SALE>', 'sale')
+            ]
+
+            for pattern, role in patterns:
+                for match in re.finditer(pattern, history, re.DOTALL):
+                    message_data.append({
+                        "role": role,
+                        "content": match.group(1).strip(),
+                        "timestamp": time.time(),
+                        "position": match.start()
+                    })
+
+            # Sort by position and clean up
+            message_data.sort(key=lambda x: x["position"])
+
+            messages = []
+            for msg in message_data:
+                messages.append({
+                    "role": "user" if msg["role"] == "user" else "assistant",
+                    "content": msg["content"],
+                    "timestamp": msg["timestamp"]
+                })
+
+            return messages
+
+        except Exception as e:
+            logger.error("Error in history processing", error=str(e))
+            # Fallback: truncate and return as single message
+            truncated_history = history[-MAX_HISTORY_LENGTH:] if len(history) > MAX_HISTORY_LENGTH else history
+            return [{"role": "user", "content": truncated_history, "timestamp": time.time()}]
+
+
+class ConfigurationService:
+    """Service for retrieving various configurations."""
+
+    async def get_ai_config(self, core_ai_id: str) -> Dict[str, Any]:
+        """Get AI core configuration."""
         try:
             async with async_session_factory() as session:
                 core_ai_crud = CoreAICRUD(session)
@@ -954,21 +1082,14 @@ class MessageHandler:
                             "meta_data": core_ai.meta_data
                         }
 
-                # Return default AI config
-                return {
-                    "core_ai_id": "default",
-                    "name": "Default AI",
-                    "api_endpoint": "http://localhost:8000",
-                    "auth_required": False,
-                    "timeout_seconds": 30,
-                    "meta_data": {}
-                }
+                return self._get_default_ai_config()
+
         except Exception as e:
             logger.error("Error getting AI config", error=str(e))
-            return {"core_ai_id": "default", "name": "Default AI"}
+            return self._get_default_ai_config()
 
-    async def _get_platform_config(self, platform_id: str) -> Dict[str, Any]:
-        """Get platform configuration"""
+    async def get_platform_config(self, platform_id: str) -> Dict[str, Any]:
+        """Get platform configuration."""
         try:
             async with async_session_factory() as session:
                 platform_crud = PlatformCRUD(session)
@@ -976,241 +1097,375 @@ class MessageHandler:
                 if platform_id and platform_id != "default":
                     platform = await platform_crud.get_by_id_with_actions(uuid.UUID(platform_id))
                     if platform and platform.is_active:
-                        if platform.actions:
-                            actions = [action.model_dump() for action in platform.actions]
-                        else:
-                            actions = []
+                        actions = [action.model_dump() for action in platform.actions] if platform.actions else []
                         return {
+                            "id": str(platform.id),
                             "platform_id": str(platform.id),
                             "name": platform.name,
                             "description": platform.description,
                             "base_url": platform.base_url,
                             "auth_required": platform.auth_required,
                             "auth_token": platform.auth_token,
+                            "rate_limit_per_minute": platform.rate_limit_per_minute,
                             "meta_data": platform.meta_data,
                             "actions": actions
                         }
 
-                # Return default platform config
-                return {
-                    "platform_id": "default",
-                    "name": "Default Platform",
-                    "description": "Default platform",
-                    "base_url": "http://localhost:8000",
-                    "auth_required": False,
-                    "meta_data": {}
-                }
+                return self._get_default_platform_config()
+
         except Exception as e:
             logger.error("Error getting platform config", error=str(e))
-            return {"platform_id": "default", "name": "Default Platform"}
+            return self._get_default_platform_config()
 
-    async def _parse_history(self, history: str, conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Parse and chunk history into structured messages"""
+    def _get_default_ai_config(self) -> Dict[str, Any]:
+        """Get default AI configuration."""
+        return {
+            "core_ai_id": "default",
+            "name": "Default AI",
+            "api_endpoint": "http://localhost:8000",
+            "auth_required": False,
+            "timeout_seconds": 30,
+            "meta_data": {}
+        }
+
+    def _get_default_platform_config(self) -> Dict[str, Any]:
+        """Get default platform configuration."""
+        return {
+            "id": "default",
+            "platform_id": "default",
+            "name": "Default Platform",
+            "description": "Default platform",
+            "base_url": "http://localhost:8000",
+            "auth_required": False,
+            "rate_limit_per_minute": 60,
+            "meta_data": {},
+            "actions": []
+        }
+
+
+class MessageHandler:
+    """Enhanced MessageHandler with improved architecture."""
+
+    def __init__(self):
+        self.cache_manager = None
+        self.lock_manager = None
+        self.background_job_manager = None
+        self.bot_config_service = BotConfigService()
+        self.history_processor = None
+        self.config_service = ConfigurationService()
+        self._initialized = False
+
+    async def initialize(self):
+        """Initialize all components."""
+        if self._initialized:
+            return
+
         try:
-            if not history:
-                return []
+            # Initialize cache manager
+            try:
+                redis_client = await get_redis_client()
+                self.cache_manager = CacheManager(redis_client)
+                logger.info("MessageHandler Redis connection established")
+            except Exception as redis_error:
+                logger.warning("Redis connection failed, using fallback", error=str(redis_error))
+                self.cache_manager = CacheManager(None)
 
-            # Find all message patterns with their positions in the text
-            message_data = []
+            # Initialize all components
+            self.lock_manager = MessageLockManager(self.cache_manager)
+            self.background_job_manager = BackgroundJobManager(self.cache_manager, self)
+            self.history_processor = HistoryProcessor(self.cache_manager)
 
-            patterns = [
-                (r'<USER>(.*?)</USER>', 'user'),
-                (r'<BOT>(.*?)</BOT>', 'bot'),
-                (r'<SALE>(.*?)</SALE>', 'sale')
-            ]
-
-            for pattern, role in patterns:
-                for match in re.finditer(pattern, history, re.DOTALL):
-                    message_data.append({
-                        "role": role,
-                        "content": match.group(1).strip(),
-                        "timestamp": time.time(),
-                        "position": match.start()  # For proper ordering
-                    })
-
-            # Sort by position in original string to maintain chronological order
-            message_data.sort(key=lambda x: x["position"])
-
-            # Remove position field and return clean message list
-            messages = []
-            for msg in message_data:
-                messages.append({
-                    "role": "user" if msg["role"] == "user" else "assistant",
-                    "content": msg["content"],
-                    "timestamp": msg["timestamp"]
-                })
-
-            return messages
+            self._initialized = True
+            logger.info("Enhanced message handler initialized successfully",
+                       redis_available=bool(self.cache_manager.primary))
 
         except Exception as e:
-            logger.error("Error in history processing", error=str(e))
-            # Fallback: try to parse original history with basic truncation
-            truncated_history = history[-max_chars:] if len(history) > max_chars else history
-            return [{"role": "user", "content": truncated_history, "timestamp": time.time()}]
+            logger.error("Failed to initialize message handler", error=str(e))
+            self._initialized = True  # Allow degraded mode
 
-    async def _set_history_in_db(self, conversation_id: str, history: str) -> bool:
-        """Set history in database"""
+    async def handle_message_request(
+        self,
+        conversation_id: str,
+        bot_id: str,
+        history: str,
+        resources: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Main entry point for message handling."""
+        if not self._initialized:
+            await self.initialize()
+
+        logger.info("Handling message request",
+                   bot_id=bot_id,
+                   conversation_id=conversation_id,
+                   history_length=len(history))
+
         try:
-            async with async_session_factory() as session:
-                conversation_crud = ConversationCRUD(session)
-                await conversation_crud.update(uuid.UUID(conversation_id), {"history": history})
-                return True
+            # Get or create conversation
+            section_id = await self._get_or_create_conversation(conversation_id, bot_id)
+
+            # Process history
+            effective_history = await self.history_processor.cut_old_history(section_id, history)
+
+            if len(effective_history) != len(history):
+                logger.info("Cut old history from new history",
+                           section_id=section_id,
+                           original_length=len(history),
+                           effective_length=len(effective_history))
+
+            # Get configurations
+            bot_config = await self.bot_config_service.get_bot_config(section_id)
+            ai_config = await self.config_service.get_ai_config(bot_config.get("core_ai_id"))
+            platform_config = await self.config_service.get_platform_config(bot_config.get("platform_id"))
+
+            # Parse messages
+            parsed_messages = self.history_processor.parse_history(effective_history, section_id)
+            logger.info("Parsed messages", parsed_messages=parsed_messages)
+            print("Parsed messages", json.dumps(parsed_messages, indent=4))
+
+            # Handle locking and job creation
+            return await self._handle_locking_and_processing(
+                section_id, conversation_id, effective_history, parsed_messages,
+                bot_config, ai_config, platform_config, resources
+            )
+
         except Exception as e:
-            logger.error("Error setting history in database", error=str(e))
-            return False
+            logger.error("Message handling failed",
+                        conversation_id=conversation_id, error=str(e))
+            return {
+                "success": False,
+                "status": "failed",
+                "error": str(e),
+                "message": f"Message processing failed: {str(e)}"
+            }
+
+    async def _get_or_create_conversation(self, conversation_id: str, bot_id: str) -> str:
+        """Get or create conversation and return section_id."""
+        async with async_session_factory() as session:
+            conversation_crud = ConversationCRUD(session)
+            conversation = await conversation_crud.get_by_conversation_id(conversation_id)
+
+            if not conversation:
+                conversation = await conversation_crud.create_conversation_by_bot_and_conversation_id(
+                    uuid.UUID(bot_id), conversation_id
+                )
+
+            return str(conversation.id)
+
+    async def _handle_locking_and_processing(
+        self,
+        section_id: str,
+        conversation_id: str,
+        effective_history: str,
+        parsed_messages: List[Dict[str, Any]],
+        bot_config: Dict[str, Any],
+        ai_config: Dict[str, Any],
+        platform_config: Dict[str, Any],
+        resources: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Handle message locking and processing logic."""
+        # Check lock and consolidate messages
+        lock_result = await self.lock_manager.check_and_acquire_lock(
+            conversation_id=section_id,
+            history=effective_history,
+            resources=resources
+        )
+
+        logger.info("Lock check completed",
+                   action=lock_result["action"],
+                   should_call_ai=lock_result["should_call_ai"],
+                   parsed_message_count=len(parsed_messages))
+
+        # Handle job cancellation if needed
+        if lock_result.get("should_cancel_previous") and lock_result.get("previous_ai_job_id"):
+            await self._cancel_previous_job(lock_result["previous_ai_job_id"], section_id)
+
+        if lock_result["should_call_ai"]:
+            return await self._start_ai_processing_flow(
+                section_id, conversation_id, lock_result,
+                bot_config, ai_config, platform_config,
+                parsed_messages, resources
+            )
+        else:
+            return {
+                "success": True,
+                "status": "locked",
+                "action": lock_result["action"],
+                "message": "Message is being processed by another request"
+            }
+
+    async def _cancel_previous_job(self, previous_job_id: str, section_id: str):
+        """Cancel previous job."""
+        try:
+            await self.background_job_manager.cancel_job(previous_job_id)
+            logger.info("Previous AI job cancelled",
+                       cancelled_job_id=previous_job_id,
+                       conversation_id=section_id)
+        except Exception as cancel_error:
+            logger.warning("Failed to cancel previous job",
+                          job_id=previous_job_id, error=str(cancel_error))
+
+    async def _start_ai_processing_flow(
+        self,
+        section_id: str,
+        conversation_id: str,
+        lock_result: Dict[str, Any],
+        bot_config: Dict[str, Any],
+        ai_config: Dict[str, Any],
+        platform_config: Dict[str, Any],
+        parsed_messages: List[Dict[str, Any]],
+        resources: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Start AI processing flow."""
+        # await 2 seconds
+        await asyncio.sleep(2)
+
+        # Start AI processing
+        ai_job_id = await self._start_ai_processing(
+            section_id, conversation_id, lock_result["lock_data"],
+            bot_config, ai_config, platform_config,
+            parsed_messages, resources
+        )
+
+        # Update lock with job ID
+        await self.lock_manager.update_lock_with_ai_job(section_id, ai_job_id)
+
+        action_description = "Message received and AI processing started"
+        if lock_result.get("should_cancel_previous"):
+            action_description = "Previous job cancelled, reprocessing with new history"
+
+        return {
+            "success": True,
+            "status": "ai_processing_started",
+            "action": lock_result["action"],
+            "ai_job_id": ai_job_id,
+            "lock_id": lock_result["lock_data"]["lock_id"],
+            "consolidated_messages": len(parsed_messages),
+            "consolidated_count": lock_result.get("consolidated_message_count", 1),
+            "bot_name": bot_config["name"],
+            "message": action_description,
+            "cancelled_previous_job": lock_result.get("previous_ai_job_id"),
+            "reprocessing": lock_result.get("should_cancel_previous", False)
+        }
+
+    # Legacy method aliases for backward compatibility
+    async def _get_cached_history(self, conversation_id: str) -> Optional[str]:
+        """Legacy method for backward compatibility."""
+        return await self.history_processor.get_cached_history(conversation_id)
 
     async def _set_cached_history(self, conversation_id: str, history: str) -> bool:
-        """Set cached history in Redis"""
+        """Legacy method for backward compatibility."""
+        return await self.history_processor.set_cached_history(conversation_id, history)
+
+    async def _save_history_to_database_from_platform(self, conversation_id: str):
+        """Save current history to database from platform actions context."""
         try:
-            cache_key = f"processed_history:{conversation_id}"
-            cache_data = {
-                "history": history,
-                "processed_at": time.time(),
-                "history_length": len(history)
-            }
-            await self.redis.set(cache_key, json.dumps(cache_data), ex=3600)
-            return True
-        except Exception as e:
-            logger.error("Error setting cached history in Redis", error=str(e))
-            return False
+            # Get current cached history
+            current_history = await self.history_processor.get_cached_history(conversation_id)
 
-    async def _get_cached_history(self, conversation_id: str) -> Optional[str]:
-        """Get cached processed history from Redis"""
-        try:
-            cache_key = f"processed_history:{conversation_id}"
+            if not current_history:
+                logger.warning("No cached history found to save to database from platform context",
+                             conversation_id=conversation_id)
+                return
 
-            if self.redis:
-                cached_data = await self.redis.get(cache_key)
-                if cached_data:
-                    try:
-                        data = json.loads(cached_data)
-                        return data.get("history", "")
-                    except json.JSONDecodeError:
-                        logger.warning("Invalid cached history data", conversation_id=conversation_id)
-                        return None
-            else:
-                # Fallback to in-memory cache (for development)
-                fallback_key = f"history_cache_{conversation_id}"
-                if hasattr(self, '_history_cache'):
-                    return self._history_cache.get(fallback_key)
-
-            return None
-
-        except Exception as e:
-            logger.warning("Failed to get cached history",
-                          conversation_id=conversation_id,
-                          error=str(e))
-            return None
-
-    async def _get_processed_history(self, conversation_id: str) -> Optional[str]:
-        """Get last processed history from database conversation record"""
-        try:
-            async with async_session_factory() as session:
-                conversation_crud = ConversationCRUD(session)
-                conversation = await conversation_crud.get_by_id_simple(uuid.UUID(conversation_id))
-
-                if conversation and conversation.history:
-                    logger.debug("Retrieved history from database",
-                               conversation_id=conversation_id,
-                               history_length=len(conversation.history))
-                    return conversation.history
-
-                logger.debug("No history found in database",
-                           conversation_id=conversation_id)
-                return None
-
-        except Exception as e:
-            logger.warning("Failed to get history from database",
-                          conversation_id=conversation_id,
-                          error=str(e))
-            return None
-
-    async def _cut_history(self, current_history: str, old_history: str) -> str:
-        """Cut old history from current history to get only new messages"""
-        try:
-            if not old_history or old_history not in current_history:
-                # Old history not found in current, return all as new
-                logger.debug("Old history not found in current, treating all as new")
-                return current_history
-
-            # Find where old history ends and cut from there
-            old_end_position = current_history.find(old_history) + len(old_history)
-            new_part = current_history[old_end_position:].strip()
-
-            logger.debug("Successfully cut old history",
-                        old_history_length=len(old_history),
-                        new_part_length=len(new_part),
-                        cut_position=old_end_position)
-
-            return new_part
-
-        except Exception as e:
-            logger.warning("Failed to cut old history, returning all as new", error=str(e))
-            return current_history
-
-    async def _cache_processed_history(self, conversation_id: str, history: str):
-        """Cache the processed history for incremental processing"""
-        try:
-            cache_key = f"processed_history:{conversation_id}"
-            cache_data = {
-                "history": history,
-                "processed_at": time.time(),
-                "conversation_id": conversation_id
-            }
-
-            if self.redis:
-                # Cache for 1 hour
-                await self.redis.set(
-                    cache_key,
-                    json.dumps(cache_data),
-                    ex=3600
-                )
-                logger.debug("Cached processed history in Redis",
-                           conversation_id=conversation_id,
-                           history_length=len(history))
-            else:
-                # Fallback to in-memory cache
-                if not hasattr(self, '_history_cache'):
-                    self._history_cache = {}
-                fallback_key = f"history_cache_{conversation_id}"
-                self._history_cache[fallback_key] = history
-                logger.debug("Cached processed history in memory",
-                           conversation_id=conversation_id,
-                           history_length=len(history))
-
-        except Exception as e:
-            logger.warning("Failed to cache processed history",
-                          conversation_id=conversation_id,
-                          error=str(e))
-
-    async def _update_conversation_history_in_db(self, conversation_id: str, new_history: str):
-        """Update conversation history in database with new processed history"""
-        try:
+            # Update conversation history in database
             async with async_session_factory() as session:
                 conversation_crud = ConversationCRUD(session)
 
-                # Update conversation with new history
-                update_data = {"history": new_history}
+                # Update the conversation with current history
+                update_data = {
+                    "history": current_history
+                }
+
                 updated = await conversation_crud.update(
                     uuid.UUID(conversation_id),
                     update_data
                 )
 
                 if updated:
-                    logger.debug("Updated conversation history in database",
+                    logger.info("Successfully saved history to database from platform context",
                                conversation_id=conversation_id,
-                               new_history_length=len(new_history))
-                    return True
+                               history_length=len(current_history))
                 else:
-                    logger.warning("Failed to update conversation history",
+                    logger.warning("Failed to update conversation history from platform context",
                                  conversation_id=conversation_id)
-                    return False
 
         except Exception as e:
-            logger.error("Error updating conversation history in database",
+            logger.error("Error saving history to database from platform context",
                         conversation_id=conversation_id,
                         error=str(e))
-            return False
+            raise
+
+    async def _remove_lock_from_platform_actions(self, conversation_id: str, job_id: str, ai_action: str):
+        """Remove lock from platform actions context."""
+        try:
+            # Get current lock info for logging purposes
+            lock_data = await self.lock_manager.get_lock_info(conversation_id)
+
+            if not lock_data:
+                logger.warning("No lock found to remove from platform actions context",
+                             conversation_id=conversation_id,
+                             job_id=job_id,
+                             ai_action=ai_action)
+                return
+
+            # Log the lock information before removal
+            logger.info("Removing lock from platform actions context",
+                       conversation_id=conversation_id,
+                       job_id=job_id,
+                       ai_action=ai_action,
+                       lock_id=lock_data.lock_id,
+                       lock_created_at=lock_data.created_at,
+                       processing_duration_seconds=time.time() - lock_data.created_at)
+
+            # Remove the lock
+            success = await self.lock_manager.release_lock(conversation_id)
+
+            if success:
+                logger.info("Lock successfully removed from platform actions context",
+                           conversation_id=conversation_id,
+                           job_id=job_id,
+                           ai_action=ai_action,
+                           lock_id=lock_data.lock_id)
+            else:
+                logger.warning("Failed to remove lock from platform actions - may have already been removed",
+                             conversation_id=conversation_id,
+                             job_id=job_id,
+                             ai_action=ai_action,
+                             lock_id=lock_data.lock_id)
+
+        except Exception as e:
+            logger.error("Error removing lock from platform actions context",
+                        conversation_id=conversation_id,
+                        job_id=job_id,
+                        ai_action=ai_action,
+                        error=str(e))
+            raise
+
+    # Public interface methods
+    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
+        """Get job processing status."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.background_job_manager.get_job_status(job_id)
+
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a processing job."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.background_job_manager.cancel_job(job_id)
+
+    async def get_conversation_lock_info(self, conversation_id: str) -> Optional[Dict]:
+        """Get current lock information for conversation."""
+        if not self._initialized:
+            await self.initialize()
+        lock_data = await self.lock_manager.get_lock_info(conversation_id)
+        return lock_data.to_dict() if lock_data else None
+
+    async def release_conversation_lock(self, conversation_id: str) -> bool:
+        """Manually release conversation lock."""
+        if not self._initialized:
+            await self.initialize()
+        return await self.lock_manager.release_lock(conversation_id)
 
     async def _start_ai_processing(
         self,
@@ -1223,8 +1478,7 @@ class MessageHandler:
         messages: List[Dict[str, Any]],
         resources: Optional[Dict[str, Any]]
     ) -> str:
-        """Start background AI processing job"""
-
+        """Start background AI processing job."""
         ai_job_payload = {
             "conversation_id": section_id,
             "platform_conversation_id": conversation_id,
@@ -1236,10 +1490,7 @@ class MessageHandler:
             "resources": resources or {},
         }
 
-        # Create background job
-        ai_job_id = await self.background_job_manager.create_ai_processing_job(
-            ai_job_payload
-        )
+        ai_job_id = await self.background_job_manager.create_ai_processing_job(ai_job_payload)
 
         logger.info("AI processing job created",
                    conversation_id=section_id,
@@ -1248,36 +1499,8 @@ class MessageHandler:
 
         return ai_job_id
 
-    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
-        """Get job processing status"""
-        if not self._initialized:
-            await self.initialize()
-
-        return await self.background_job_manager.get_job_status(job_id)
-
-    async def cancel_job(self, job_id: str) -> bool:
-        """Cancel a processing job"""
-        if not self._initialized:
-            await self.initialize()
-
-        return await self.background_job_manager.cancel_job(job_id)
-
-    async def get_conversation_lock_info(self, conversation_id: str) -> Optional[Dict]:
-        """Get current lock information for conversation"""
-        if not self._initialized:
-            await self.initialize()
-
-        return await self.lock_manager.get_lock_info(conversation_id)
-
-    async def release_conversation_lock(self, conversation_id: str) -> bool:
-        """Manually release conversation lock (for admin/debug purposes)"""
-        if not self._initialized:
-            await self.initialize()
-
-        return await self.lock_manager.release_lock(conversation_id)
-
     async def get_handler_status(self) -> Dict[str, Any]:
-        """Get overall handler status"""
+        """Get overall handler status."""
         if not self._initialized:
             return {
                 "initialized": False,
@@ -1289,7 +1512,8 @@ class MessageHandler:
         return {
             "initialized": self._initialized,
             "components": {
-                "redis_connected": bool(self.redis),
+                "cache_manager": bool(self.cache_manager),
+                "redis_connected": bool(self.cache_manager.primary) if self.cache_manager else False,
                 "lock_manager": bool(self.lock_manager),
                 "background_job_manager": worker_status
             },
@@ -1300,7 +1524,7 @@ class MessageHandler:
         }
 
     async def start_background_processing(self):
-        """Start background job processing worker"""
+        """Start background job processing worker."""
         if not self._initialized:
             await self.initialize()
 
@@ -1308,58 +1532,41 @@ class MessageHandler:
         await self.background_job_manager.start_background_worker()
 
     async def stop_background_processing(self):
-        """Stop background job processing worker"""
+        """Stop background job processing worker."""
         if self.background_job_manager:
             logger.info("Stopping background processing worker")
             await self.background_job_manager.stop_background_worker()
 
-    async def cleanup_old_locks(self, max_age_hours: int = 24) -> int:
-        """Clean up old message locks"""
+    async def cleanup_old_locks(self, max_age_hours: int = CLEANUP_MAX_AGE_HOURS) -> int:
+        """Clean up old message locks."""
         if not self._initialized:
             await self.initialize()
 
         try:
-            if not self.redis:
-                # Clean up in-memory fallback locks
-                current_time = time.time()
-                max_age_seconds = max_age_hours * 3600
-                cleaned_count = 0
-
-                keys_to_remove = []
-                for key, lock_data in self.lock_manager._fallback_locks.items():
-                    if current_time - lock_data.get("created_at", 0) > max_age_seconds:
-                        keys_to_remove.append(key)
-
-                for key in keys_to_remove:
-                    del self.lock_manager._fallback_locks[key]
-                    cleaned_count += 1
-
-                logger.info("Cleaned up old fallback locks", count=cleaned_count)
-                return cleaned_count
-
-            # Redis cleanup logic
-            lock_pattern = f"{self.lock_manager.lock_prefix}*"
-            lock_keys = await self.redis.keys(lock_pattern)
-
-            cleaned_count = 0
             current_time = time.time()
             max_age_seconds = max_age_hours * 3600
+            cleaned_count = 0
+
+            # Get all lock keys
+            lock_pattern = f"{self.lock_manager.lock_prefix}*"
+            lock_keys = await self.cache_manager.keys(lock_pattern)
 
             for key in lock_keys:
-                lock_data = await self.redis.get(key)
-                if lock_data:
-                    try:
-                        lock_info = json.loads(lock_data)
-                        created_at = lock_info.get("created_at", 0)
-
+                try:
+                    lock_data = await self.cache_manager.get_json(key)
+                    if lock_data:
+                        created_at = lock_data.get("created_at", 0)
                         if current_time - created_at > max_age_seconds:
-                            await self.redis.delete(key)
+                            await self.cache_manager.delete(key)
                             cleaned_count += 1
-
-                    except json.JSONDecodeError:
-                        # Invalid lock data, remove it
-                        await self.redis.delete(key)
+                    else:
+                        # Remove invalid lock data
+                        await self.cache_manager.delete(key)
                         cleaned_count += 1
+                except Exception as e:
+                    logger.warning("Error processing lock for cleanup", lock_key=key, error=str(e))
+                    await self.cache_manager.delete(key)
+                    cleaned_count += 1
 
             logger.info("Cleaned up old locks", count=cleaned_count)
             return cleaned_count
@@ -1368,47 +1575,33 @@ class MessageHandler:
             logger.error("Failed to cleanup old locks", error=str(e))
             return 0
 
-    async def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
-        """Cleanup old jobs older than max_age_hours"""
+    async def cleanup_old_jobs(self, max_age_hours: int = CLEANUP_MAX_AGE_HOURS) -> int:
+        """Cleanup old jobs older than max_age_hours."""
         try:
             cleanup_count = 0
             cutoff_time = time.time() - (max_age_hours * 3600)
 
-            if self.redis:
-                # Get all job keys
-                pattern = f"{self.background_job_manager.job_prefix}*"
-                keys = await self.redis.keys(pattern)
+            # Get all job keys
+            pattern = f"{self.background_job_manager.job_prefix}*"
+            keys = await self.cache_manager.keys(pattern)
 
-                for key in keys:
-                    try:
-                        job_data = await self.redis.get(key)
-                        if job_data:
-                            data = json.loads(job_data)
-                            created_at = data.get("created_at", 0)
-
-                            if created_at < cutoff_time:
-                                await self.redis.delete(key)
-                                cleanup_count += 1
-                                logger.debug("Cleaned up old job",
-                                           job_key=key,
-                                           age_hours=(time.time() - created_at) / 3600)
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.warning("Error processing job for cleanup",
-                                     job_key=key, error=str(e))
+            for key in keys:
+                try:
+                    job_data = await self.cache_manager.get_json(key)
+                    if job_data:
+                        created_at = job_data.get("created_at", 0)
+                        if created_at < cutoff_time:
+                            await self.cache_manager.delete(key)
+                            cleanup_count += 1
+                    else:
                         # Delete corrupted job data
-                        await self.redis.delete(key)
+                        await self.cache_manager.delete(key)
                         cleanup_count += 1
-            else:
-                # Fallback cleanup for in-memory jobs
-                keys_to_remove = []
-                for key, data in self.background_job_manager._fallback_jobs.items():
-                    created_at = data.get("created_at", 0)
-                    if created_at < cutoff_time:
-                        keys_to_remove.append(key)
-
-                for key in keys_to_remove:
-                    del self.background_job_manager._fallback_jobs[key]
-                    cleanup_count += len(keys_to_remove)
+                except Exception as e:
+                    logger.warning("Error processing job for cleanup",
+                                 job_key=key, error=str(e))
+                    await self.cache_manager.delete(key)
+                    cleanup_count += 1
 
             logger.info("Job cleanup completed",
                        cleanup_count=cleanup_count,
@@ -1429,7 +1622,7 @@ class MessageHandler:
         job_id: str,
         platform_client: PlatformClient = None
     ):
-        """Execute the AI action through the platform"""
+        """Execute the AI action through the platform."""
         try:
             platform_id = platform_config.get("platform_id") or platform_config.get("id")
             platform_name = platform_config.get("name", "Unknown Platform")
@@ -1441,12 +1634,10 @@ class MessageHandler:
                        platform_id=platform_id,
                        platform_name=platform_name)
 
-            # For now, we'll implement a simplified action execution
-            # In a full implementation, this would make HTTP calls to the platform's API
             action_executed = False
-
             platform_actions = platform_config.get("actions", [])
 
+            # Build actions map
             actions_map = {}
             for action in platform_actions:
                 actions_map[action.get("name")] = {
@@ -1455,14 +1646,12 @@ class MessageHandler:
                     "meta_data": action.get("meta_data")
                 }
 
-            platform_action = actions_map.get(ai_action, None)
+            platform_action = actions_map.get(ai_action)
 
             if platform_action:
-                # Log bot response that would be sent to platform
                 path = platform_action.get("path")
                 method = platform_action.get("method")
                 meta_data = platform_action.get("meta_data")
-
                 url = f"{platform_config.get('base_url')}{path}"
 
                 await platform_client.execute_platform_action(
@@ -1476,7 +1665,6 @@ class MessageHandler:
                 )
 
                 action_executed = True
-
             else:
                 logger.warning("Unknown AI action type",
                              job_id=job_id,
@@ -1484,7 +1672,7 @@ class MessageHandler:
                              ai_action=ai_action,
                              platform_name=platform_name)
 
-            # Update job status with action execution results
+            # Update job status
             if action_executed:
                 await self.background_job_manager._update_job_status(job_id, "completed", {
                     "ai_action": ai_action,
@@ -1511,7 +1699,6 @@ class MessageHandler:
                         ai_action=ai_action,
                         error=str(e))
 
-            # Update job status as failed
             await self.background_job_manager._update_job_status(job_id, "failed", {
                 "error": f"Platform action execution failed: {str(e)}",
                 "ai_action": ai_action,
@@ -1519,7 +1706,7 @@ class MessageHandler:
             })
 
     async def close(self):
-        """Clean up all resources"""
+        """Clean up all resources."""
         logger.info("Closing enhanced message handler")
 
         if self.background_job_manager:
@@ -1527,3 +1714,107 @@ class MessageHandler:
 
         self._initialized = False
         logger.info("Enhanced message handler closed")
+
+    async def _remove_lock_after_completion(self, conversation_id: str, job_id: str, status: str, ai_result: Dict[str, Any]):
+        """Remove lock after AI job completion (success or failure)."""
+        try:
+            # Get current lock info for logging purposes
+            lock_data = await self.lock_manager.get_lock_info(conversation_id)
+
+            if not lock_data:
+                logger.warning("No lock found to remove after completion",
+                             conversation_id=conversation_id,
+                             job_id=job_id,
+                             status=status)
+                return
+
+            # Log the lock information before removal
+            logger.info("Removing lock after AI job completion",
+                       conversation_id=conversation_id,
+                       job_id=job_id,
+                       status=status,
+                       lock_id=lock_data.lock_id,
+                       ai_action=ai_result.get("action", ""),
+                       lock_created_at=lock_data.created_at,
+                       processing_duration_seconds=time.time() - lock_data.created_at)
+
+            # Remove the lock
+            success = await self.lock_manager.release_lock(conversation_id)
+
+            if success:
+                logger.info("Lock successfully removed after AI processing",
+                           conversation_id=conversation_id,
+                           job_id=job_id,
+                           status=status,
+                           lock_id=lock_data.lock_id)
+            else:
+                logger.warning("Failed to remove lock - may have already been removed",
+                             conversation_id=conversation_id,
+                             job_id=job_id,
+                             status=status,
+                             lock_id=lock_data.lock_id)
+
+        except Exception as e:
+            logger.error("Error removing lock after completion",
+                        conversation_id=conversation_id,
+                        job_id=job_id,
+                        status=status,
+                        error=str(e))
+            raise
+
+    async def _update_lock_for_continuation(self, conversation_id: str, job_id: str, ai_result: Dict[str, Any]):
+        """Update lock to allow conversation continuation after AI job failure."""
+        try:
+            # Get current lock info
+            lock_data = await self.lock_manager.get_lock_info(conversation_id)
+
+            if not lock_data:
+                logger.warning("No lock found to update for continuation",
+                             conversation_id=conversation_id,
+                             job_id=job_id)
+                return
+
+            # Update lock to mark it as ready for retry/continuation
+            lock_key = f"{self.lock_manager.lock_prefix}{conversation_id}"
+
+            # Create updated lock that allows continuation
+            updated_lock = LockData(
+                conversation_id=lock_data.conversation_id,
+                history_hash=lock_data.history_hash,
+                created_at=lock_data.created_at,
+                lock_id=LockData.generate_lock_id(),  # Generate new lock_id for retry
+                consolidated_count=1,  # Reset count for new processing attempt
+                updated_at=time.time(),
+                ai_job_id=None,  # Clear failed job_id
+                previous_ai_job_id=job_id  # Track the failed job
+            )
+
+            # Add failure information to lock data
+            lock_dict = updated_lock.to_dict()
+            lock_dict.update({
+                "processing_status": "ready_for_retry",
+                "last_ai_action": ai_result.get("action", ""),
+                "last_failure_reason": ai_result.get("error", "Unknown error"),
+                "last_failure_at": time.time(),
+                "failed_job_id": job_id
+            })
+
+            await self.cache_manager.set_json(
+                lock_key,
+                lock_dict,
+                LOCK_TTL_SECONDS
+            )
+
+            logger.info("Lock updated for conversation continuation",
+                       conversation_id=conversation_id,
+                       job_id=job_id,
+                       new_lock_id=updated_lock.lock_id,
+                       old_lock_id=lock_data.lock_id,
+                       failure_reason=ai_result.get("error", "Unknown"))
+
+        except Exception as e:
+            logger.error("Error updating lock for continuation",
+                        conversation_id=conversation_id,
+                        job_id=job_id,
+                        error=str(e))
+            raise

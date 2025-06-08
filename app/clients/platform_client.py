@@ -5,6 +5,9 @@ import uuid
 from typing import Dict, Any, Optional, List, Union
 import structlog
 import json
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from urllib.parse import urlencode
 
 from app.core.settings import settings
 from app.core.database import async_session_factory
@@ -12,154 +15,76 @@ from app.crud.platform_crud import PlatformCRUD
 
 logger = structlog.get_logger(__name__)
 
+# Constants
+CACHE_TIMEOUT_SECONDS = 300
+DEFAULT_RATE_LIMIT = 60
+DEFAULT_TIMEOUT = 30
+RATE_LIMIT_WINDOW_SECONDS = 60
 
-class PlatformClient:
-    """Enhanced Platform client with database configuration support"""
 
-    def __init__(self):
-        self.timeout = aiohttp.ClientTimeout(total=30)
-        self.session = None
-        self._platform_configs_cache = {}  # Cache for Platform configurations
-        self.rate_limiters = {}  # Rate limiting per Platform instance
+@dataclass
+class PlatformConfig:
+    """Platform configuration data class."""
+    id: str
+    name: str
+    base_url: str
+    rate_limit_per_minute: int
+    auth_token: Optional[str]
+    meta_data: Dict[str, Any]
+    cached_at: float = 0.0
 
-    async def _get_session(self):
-        """Get or create aiohttp session"""
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(timeout=self.timeout)
-        return self.session
+    @classmethod
+    def default(cls) -> 'PlatformConfig':
+        """Create default platform configuration."""
+        return cls(
+            id="default",
+            name="Default Platform",
+            base_url="http://localhost:8000",
+            rate_limit_per_minute=DEFAULT_RATE_LIMIT,
+            auth_token=None,
+            meta_data={},
+            cached_at=time.time()
+        )
 
-    async def get_platform_config(self, platform_id: Optional[Union[str, uuid.UUID]] = None) -> Dict[str, Any]:
-        """Get Platform configuration from database."""
-        try:
-            # Convert string to UUID if needed
-            if isinstance(platform_id, str) and platform_id != "default":
-                platform_id = uuid.UUID(platform_id)
-
-            # Check cache first
-            cache_key = str(platform_id) if platform_id else "default"
-            if cache_key in self._platform_configs_cache:
-                config = self._platform_configs_cache[cache_key]
-                # Check if config is still fresh (cache for 5 minutes)
-                if time.time() - config.get("_cached_at", 0) < 300:
-                    return config
-
-            async with async_session_factory() as session:
-                platform_crud = PlatformCRUD(session)
-
-                if platform_id and platform_id != "default":
-                    # Get specific Platform configuration
-                    platform = await platform_crud.get_by_id(platform_id)
-                    if platform:
-                        platform = platform.data  # Extract the actual platform object from response
-                else:
-                    # Get first active Platform configuration
-                    active_platforms = await platform_crud.get_active(limit=1)
-                    if active_platforms and active_platforms.data:
-                        platform = active_platforms.data[0]  # Get first platform from response
-                    else:
-                        platform = None
-
-                if not platform:
-                    # Return default configuration
-                    logger.info("No Platform configuration found, using default",
-                               requested_id=str(platform_id) if platform_id else "None")
-
-                    default_config = {
-                        "id": "default",
-                        "name": "Default Platform",
-                        "base_url": "http://localhost:8000",
-                        "rate_limit_per_minute": 60,
-                        "auth_token": None,
-                        "meta_data": {},
-                        "_cached_at": time.time()
-                    }
-
-                    # Cache the default configuration
-                    self._platform_configs_cache[cache_key] = default_config
-                    return default_config
-
-                if not platform.is_active:
-                    logger.warning("Platform configuration is inactive, using default",
-                                 platform_id=str(platform.id))
-
-                    default_config = {
-                        "id": "default",
-                        "name": "Default Platform",
-                        "base_url": "http://localhost:8000",
-                        "rate_limit_per_minute": 60,
-                        "auth_token": None,
-                        "meta_data": {},
-                        "_cached_at": time.time()
-                    }
-
-                    # Cache the default configuration
-                    self._platform_configs_cache["default"] = default_config
-                    return default_config
-
-                # Build configuration
-                config = {
-                    "id": str(platform.id),
-                    "name": platform.name,
-                    "base_url": platform.base_url,
-                    "rate_limit_per_minute": platform.rate_limit_per_minute,
-                    "auth_token": platform.auth_token,
-                    "meta_data": platform.meta_data or {},
-                    "_cached_at": time.time()
-                }
-
-                # Cache the configuration
-                self._platform_configs_cache[cache_key] = config
-                return config
-
-        except Exception as e:
-            logger.error("Failed to get Platform configuration",
-                        platform_id=str(platform_id), error=str(e))
-
-            # Return default configuration as fallback
-            logger.info("Returning default Platform configuration as fallback")
-            default_config = {
-                "id": "default",
-                "name": "Default Platform",
-                "base_url": "http://localhost:8000",
-                "rate_limit_per_minute": 60,
-                "auth_token": None,
-                "meta_data": {},
-                "_cached_at": time.time()
-            }
-            return default_config
-
-    def _prepare_headers(self, config: Dict[str, Any]) -> Dict[str, str]:
-        """Prepare headers for Platform API request."""
-        headers = {
-            "accept": "application/json",
-            "Content-Type": "application/json"
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary format."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "base_url": self.base_url,
+            "rate_limit_per_minute": self.rate_limit_per_minute,
+            "auth_token": self.auth_token,
+            "meta_data": self.meta_data,
+            "_cached_at": self.cached_at
         }
 
-        # Add authentication if available
-        if config.get("auth_token"):
-            headers["Authorization"] = f"Bearer {config['auth_token']}"
+    def is_cache_fresh(self) -> bool:
+        """Check if cached configuration is still fresh."""
+        return time.time() - self.cached_at < CACHE_TIMEOUT_SECONDS
 
-        return headers
 
-    async def _check_rate_limit(self, config: Dict[str, Any]) -> bool:
-        """Check rate limiting for Platform instance."""
-        platform_id = config["platform_id"]
-        rate_limit = config.get("rate_limit_per_minute", 60)
+class RateLimiter:
+    """Handles rate limiting for platform instances."""
 
+    def __init__(self):
+        self.limiters: Dict[str, Dict[str, Any]] = {}
+
+    def can_make_request(self, platform_id: str, rate_limit: int) -> bool:
+        """Check if a request can be made within rate limits."""
         current_time = time.time()
 
-        if platform_id not in self.rate_limiters:
-            self.rate_limiters[platform_id] = {
+        if platform_id not in self.limiters:
+            self.limiters[platform_id] = {
                 "requests": [],
                 "limit": rate_limit
             }
 
-        limiter = self.rate_limiters[platform_id]
+        limiter = self.limiters[platform_id]
 
-        # Remove requests older than 1 minute
+        # Remove requests older than the window
         limiter["requests"] = [
             req_time for req_time in limiter["requests"]
-            if current_time - req_time < 60
+            if current_time - req_time < RATE_LIMIT_WINDOW_SECONDS
         ]
 
         # Check if we can make another request
@@ -174,89 +99,395 @@ class PlatformClient:
         limiter["requests"].append(current_time)
         return True
 
+
+class PlatformConfigManager:
+    """Manages platform configurations with caching."""
+
+    def __init__(self):
+        self.cache: Dict[str, PlatformConfig] = {}
+
+    async def get_config(self, platform_id: Optional[Union[str, uuid.UUID]] = None) -> PlatformConfig:
+        """Get platform configuration with caching."""
+        try:
+            # Convert string to UUID if needed
+            if isinstance(platform_id, str) and platform_id != "default":
+                platform_id = uuid.UUID(platform_id)
+
+            # Check cache first
+            cache_key = str(platform_id) if platform_id else "default"
+            if cache_key in self.cache and self.cache[cache_key].is_cache_fresh():
+                return self.cache[cache_key]
+
+            # Fetch from database
+            config = await self._fetch_config_from_db(platform_id)
+
+            # Cache the configuration
+            self.cache[cache_key] = config
+            return config
+
+        except Exception as e:
+            logger.error("Failed to get Platform configuration",
+                        platform_id=str(platform_id), error=str(e))
+            return PlatformConfig.default()
+
+    async def _fetch_config_from_db(self, platform_id: Optional[Union[str, uuid.UUID]]) -> PlatformConfig:
+        """Fetch configuration from database."""
+        async with async_session_factory() as session:
+            platform_crud = PlatformCRUD(session)
+
+            if platform_id and platform_id != "default":
+                # Get specific Platform configuration
+                platform_response = await platform_crud.get_by_id(platform_id)
+                platform = platform_response.data if platform_response else None
+            else:
+                # Get first active Platform configuration
+                active_platforms = await platform_crud.get_active(limit=1)
+                platform = active_platforms.data[0] if active_platforms and active_platforms.data else None
+
+            if not platform or not platform.is_active:
+                if platform and not platform.is_active:
+                    logger.warning("Platform configuration is inactive, using default",
+                                 platform_id=str(platform.id))
+                else:
+                    logger.info("No Platform configuration found, using default",
+                               requested_id=str(platform_id) if platform_id else "None")
+                return PlatformConfig.default()
+
+            # Build configuration
+            return PlatformConfig(
+                id=str(platform.id),
+                name=platform.name,
+                base_url=platform.base_url,
+                rate_limit_per_minute=platform.rate_limit_per_minute,
+                auth_token=platform.auth_token,
+                meta_data=platform.meta_data or {},
+                cached_at=time.time()
+            )
+
+    def clear_cache(self):
+        """Clear the configuration cache."""
+        self.cache.clear()
+        logger.info("Platform configuration cache cleared")
+
+
+class HTTPClient:
+    """Handles HTTP operations for platform communication."""
+
+    def __init__(self):
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.timeout = aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(timeout=self.timeout)
+        return self.session
+
+    def prepare_headers(self, config: PlatformConfig) -> Dict[str, str]:
+        """Prepare headers for API request."""
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json"
+        }
+
+        if config.auth_token:
+            headers["Authorization"] = f"Bearer {config.auth_token}"
+
+        return headers
+
+    async def make_request(
+        self,
+        method: str,
+        url: str,
+        config: PlatformConfig,
+        json_data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Make HTTP request with common error handling."""
+        session = await self.get_session()
+        headers = self.prepare_headers(config)
+
+        # Add query parameters to URL if provided
+        if params:
+            url = f"{url}?{urlencode(params)}"
+
+        request_kwargs = {
+            "headers": headers,
+            "json": json_data
+        } if json_data else {"headers": headers}
+
+        try:
+            async with session.request(method, url, **request_kwargs) as response:
+                response_data = await response.json() if response.content_type == 'application/json' else await response.text()
+
+                return {
+                    "success": response.status in [200, 201],
+                    "status": response.status,
+                    "data": response_data,
+                    "error": None if response.status in [200, 201] else f"HTTP {response.status}: {response_data}"
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "status": 0,
+                "data": None,
+                "error": str(e)
+            }
+
+    async def close(self):
+        """Close the aiohttp session."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+
+class PlatformActionExecutor:
+    """Handles execution of different platform actions."""
+
+    def __init__(self, http_client: HTTPClient):
+        self.http_client = http_client
+
+    async def execute_action(
+        self,
+        action_type: str,
+        config: PlatformConfig,
+        conversation_id: str,
+        ai_response: Dict[str, Any],
+        meta_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute platform action based on type."""
+        action_handlers = {
+            "CHAT": self._handle_chat_action,
+            "CREATE_ORDER": self._handle_create_order_action,
+            "NOTIFY": self._handle_notify_action
+        }
+
+        handler = action_handlers.get(action_type)
+        if not handler:
+            return {
+                "success": False,
+                "error": f"Unknown action type: {action_type}",
+                "conversation_id": conversation_id
+            }
+
+        return await handler(config, conversation_id, ai_response, meta_data)
+
+    async def _handle_chat_action(
+        self,
+        config: PlatformConfig,
+        conversation_id: str,
+        ai_response: Dict[str, Any],
+        meta_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Handle CHAT action."""
+        url = f"{config.base_url.rstrip('/')}/send-message"
+
+        # Normalize answers
+        answer = ai_response.get("answer", [])
+        answers = [str(ans) for ans in (answer if isinstance(answer, list) else [answer])]
+
+        sub_answer = ai_response.get("sub_answer", [])
+        sub_answers = [str(ans) for ans in (sub_answer if isinstance(sub_answer, list) else [sub_answer])]
+
+        payload = {
+            "conversation_id": conversation_id,
+            "response": {
+                "answers": answers,
+                "images": ai_response.get("images", []),
+                "sub_answers": sub_answers
+            }
+        }
+
+        return await self._execute_with_logging(
+            "POST", url, config, payload, conversation_id, "CHAT"
+        )
+
+    async def _handle_create_order_action(
+        self,
+        config: PlatformConfig,
+        conversation_id: str,
+        ai_response: Dict[str, Any],
+        meta_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Handle CREATE_ORDER action."""
+        # First send chat response
+        chat_ai_response = {
+            "answer": ai_response.get("answer", []),
+            "images": ai_response.get("images", []),
+            "sub_answer": ai_response.get("sub_answer", [])
+        }
+
+        await self._handle_chat_action(config, conversation_id, chat_ai_response, meta_data)
+
+        # Then create order
+        url = f"{config.base_url.rstrip('/')}/create-order"
+
+        payload = {
+            "conversation_id": conversation_id,
+            "customer_info": {
+                "name": ai_response.get("customer_info", {}).get("name", ""),
+                "phone": ai_response.get("customer_info", {}).get("phone", ""),
+                "weight": ai_response.get("customer_info", {}).get("weight", ""),
+                "height": ai_response.get("customer_info", {}).get("height", ""),
+                "full_address": ai_response.get("customer_info", {}).get("full_address", ""),
+                "district_name": ai_response.get("customer_info", {}).get("district_name", ""),
+                "province_name": ai_response.get("customer_info", {}).get("province_name", ""),
+                "ward_name": ai_response.get("customer_info", {}).get("ward_name", "")
+            },
+            "products": [
+                {
+                    "product_code": str(product.get("product_id", "0")),
+                    "product_id_mapping": int(product.get("product_id", "0")),
+                    "product_name": product.get("product_name", ""),
+                    "quantity": product.get("quantity", 0),
+                    "price": product.get("price", 0)
+                }
+                for product in ai_response.get("products", [])
+            ],
+            "shipping_fee": ai_response.get("shipping_fee", 0),
+            "traffic_source": ai_response.get("traffic_source", ""),
+            "note": ai_response.get("note", "")
+        }
+
+        return await self._execute_with_logging(
+            "POST", url, config, payload, conversation_id, "CREATE_ORDER"
+        )
+
+    async def _handle_notify_action(
+        self,
+        config: PlatformConfig,
+        conversation_id: str,
+        ai_response: Dict[str, Any],
+        meta_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Handle NOTIFY action."""
+        url = f"{config.base_url.rstrip('/')}/notify"
+
+        payload = {
+            "conversation_id": conversation_id,
+            "phone": ai_response.get("phone", ""),
+            "intent": ai_response.get("intent", "")
+        }
+
+        return await self._execute_with_logging(
+            "POST", url, config, payload, conversation_id, "NOTIFY"
+        )
+
+    async def _execute_with_logging(
+        self,
+        method: str,
+        url: str,
+        config: PlatformConfig,
+        payload: Dict[str, Any],
+        conversation_id: str,
+        action_type: str
+    ) -> Dict[str, Any]:
+        """Execute request with consistent logging."""
+        logger.info("Executing Platform action",
+                   conversation_id=conversation_id,
+                   action_type=action_type,
+                   platform_name=config.name)
+
+        result = await self.http_client.make_request(method, url, config, payload)
+
+        if result["success"]:
+            print("======== PLATFORM PAYLOAD ===========")
+            print(json.dumps(payload, indent=4))
+            print("======== PLATFORM PAYLOAD ===========")
+
+            print("======== PLATFORM RESPONSE ===========")
+            print(json.dumps(result["data"], indent=4))
+            print("======== PLATFORM RESPONSE ===========")
+
+            logger.info("Successfully executed Platform action",
+                       conversation_id=conversation_id,
+                       action_type=action_type,
+                       platform_name=config.name)
+
+            print("Done action: ", action_type)
+
+            return {
+                "success": True,
+                "conversation_id": conversation_id,
+            }
+        else:
+            logger.error("Failed to execute Platform action",
+                       conversation_id=conversation_id,
+                       action_type=action_type,
+                       platform_name=config.name,
+                       error=result["error"])
+
+            return {
+                "success": False,
+                "error": result["error"],
+                "conversation_id": conversation_id,
+            }
+
+
+class PlatformClient:
+    """Enhanced Platform client with database configuration support."""
+
+    def __init__(self):
+        self.config_manager = PlatformConfigManager()
+        self.rate_limiter = RateLimiter()
+        self.http_client = HTTPClient()
+        self.action_executor = PlatformActionExecutor(self.http_client)
+
+    async def get_platform_config(self, platform_id: Optional[Union[str, uuid.UUID]] = None) -> Dict[str, Any]:
+        """Get Platform configuration from database."""
+        config = await self.config_manager.get_config(platform_id)
+        return config.to_dict()
+
     async def get_conversation_history(
         self,
         conversation_id: str,
         platform_config: Dict[str, Any],
         limit: int = 20
     ) -> Dict[str, Any]:
-        """Get conversation history from Platform service with database config."""
-        try:
-            # Get Platform configuration
-            config = platform_config
+        """Get conversation history from Platform service."""
+        config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
 
-            # Check rate limiting
-            if not await self._check_rate_limit(config):
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded",
-                    "conversation_id": conversation_id,
-                    "messages": []
-                }
-
-            session = await self._get_session()
-
-            # Construct the URL for getting conversation history
-            base_url = config["base_url"]
-            url = f"{base_url.rstrip('/')}/history-chat"
-
-            # Prepare headers
-            headers = self._prepare_headers(config)
-
-            # Prepare query parameters
-            params = {
-                "conversation_id": conversation_id
+        # Check rate limiting
+        if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
+            return {
+                "success": False,
+                "error": "Rate limit exceeded",
+                "conversation_id": conversation_id,
+                "history": "",
+                "resources": {}
             }
 
-            if params:
-                from urllib.parse import urlencode
-                url = f"{url}?{urlencode(params)}"
+        url = f"{config.base_url.rstrip('/')}/history-chat"
+        params = {"conversation_id": conversation_id}
 
-            logger.info("Fetching conversation history from Platform",
+        logger.info("Fetching conversation history from Platform",
+                   conversation_id=conversation_id,
+                   platform_name=config.name,
+                   url=url)
+
+        result = await self.http_client.make_request("POST", url, config, params=params)
+
+        if result["success"]:
+            data = result["data"]
+            logger.info("Successfully retrieved conversation history",
                        conversation_id=conversation_id,
-                       platform_name=config["name"],
-                       url=url)
+                       platform_name=config.name,
+                       message_count=len(data.get("messages", [])))
 
-            async with session.post(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-
-                    logger.info("Successfully retrieved conversation history",
-                               conversation_id=conversation_id,
-                               platform_name=config["name"],
-                               message_count=len(data.get("messages", [])))
-
-                    return {
-                        "success": True,
-                        "conversation_id": conversation_id,
-                        "history": data.get("history", ""),
-                        "resources": data.get("resources", {})
-                    }
-
-                else:
-                    error_text = await response.text()
-                    logger.error("Failed to get conversation history",
-                               conversation_id=conversation_id,
-                               platform_name=config["name"],
-                               status=response.status,
-                               error=error_text)
-
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status}: {error_text}",
-                        "conversation_id": conversation_id,
-                        "history": "",
-                        "resources": {}
-                    }
-
-        except Exception as e:
-            logger.error("Exception while getting conversation history",
-                        conversation_id=conversation_id,
-                        error=str(e))
+            return {
+                "success": True,
+                "conversation_id": conversation_id,
+                "history": data.get("history", ""),
+                "resources": data.get("resources", {})
+            }
+        else:
+            logger.error("Failed to get conversation history",
+                       conversation_id=conversation_id,
+                       platform_name=config.name,
+                       error=result["error"])
 
             return {
                 "success": False,
-                "error": str(e),
+                "error": result["error"],
                 "conversation_id": conversation_id,
                 "history": "",
                 "resources": {}
@@ -269,250 +500,61 @@ class PlatformClient:
         platform_config: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Send bot response to Platform service with database config."""
-        try:
-            # Get Platform configuration
-            config = platform_config
+        """Send bot response to Platform service."""
+        config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
 
-            # Check rate limiting
-            if not await self._check_rate_limit(config):
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded",
-                    "conversation_id": conversation_id,
-                    "status": "rate_limited"
-                }
-
-            session = await self._get_session()
-
-            # Construct the URL for sending message
-            base_url = config["base_url"]
-            url = f"{base_url.rstrip('/')}/send-message"
-
-            # Prepare headers
-            headers = self._prepare_headers(config)
-
-            # Prepare payload
-            payload = {
-                "content": message_content,
-                "sender_type": "bot",
-                "content_type": "text/plain",
-                "metadata": metadata or {},
-                "source": "chat-orchestrator",
-                "timestamp": time.time()
+        # Check rate limiting
+        if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
+            return {
+                "success": False,
+                "error": "Rate limit exceeded",
+                "conversation_id": conversation_id,
+                "status": "rate_limited"
             }
 
-            logger.info("Sending bot response to Platform",
+        url = f"{config.base_url.rstrip('/')}/send-message"
+
+        payload = {
+            "content": message_content,
+            "sender_type": "bot",
+            "content_type": "text/plain",
+            "metadata": metadata or {},
+            "source": "chat-orchestrator",
+            "timestamp": time.time()
+        }
+
+        logger.info("Sending bot response to Platform",
+                   conversation_id=conversation_id,
+                   platform_name=config.name,
+                   content_preview=message_content[:100])
+
+        result = await self.http_client.make_request("POST", url, config, payload)
+
+        if result["success"]:
+            data = result["data"]
+            logger.info("Successfully sent bot response",
                        conversation_id=conversation_id,
-                       platform_name=config["name"],
-                       content_preview=message_content[:100])
+                       platform_name=config.name,
+                       message_id=data.get("message_id"))
 
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status in [200, 201]:
-                    data = await response.json()
-
-                    logger.info("Successfully sent bot response",
-                               conversation_id=conversation_id,
-                               platform_name=config["name"],
-                               message_id=data.get("message_id"))
-
-                    return {
-                        "success": True,
-                        "conversation_id": conversation_id,
-                        "message_id": data.get("message_id"),
-                        "timestamp": data.get("timestamp"),
-                        "status": "sent",
-                    }
-
-                else:
-                    error_text = await response.text()
-                    logger.error("Failed to send bot response",
-                               conversation_id=conversation_id,
-                               platform_name=config["name"],
-                               status=response.status,
-                               error=error_text)
-
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status}: {error_text}",
-                        "conversation_id": conversation_id,
-                        "status": "failed"
-                    }
-
-        except Exception as e:
-            logger.error("Exception while sending bot response",
-                        conversation_id=conversation_id,
-                        error=str(e))
+            return {
+                "success": True,
+                "conversation_id": conversation_id,
+                "message_id": data.get("message_id"),
+                "timestamp": data.get("timestamp"),
+                "status": "sent",
+            }
+        else:
+            logger.error("Failed to send bot response",
+                       conversation_id=conversation_id,
+                       platform_name=config.name,
+                       error=result["error"])
 
             return {
                 "success": False,
-                "error": str(e),
+                "error": result["error"],
                 "conversation_id": conversation_id,
                 "status": "failed"
-            }
-
-    async def notify_message_received(
-        self,
-        conversation_id: str,
-        message_id: str,
-        platform_config: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Notify Platform that message was received and processing started."""
-        try:
-            # Get Platform configuration
-            config = platform_config
-
-            # Check rate limiting
-            if not await self._check_rate_limit(config):
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded",
-                    "conversation_id": conversation_id,
-                    "message_id": message_id
-                }
-
-            session = await self._get_session()
-
-            # Construct the URL for notification
-            base_url = config["base_url"]
-            url = f"{base_url.rstrip('/')}/update-message-status"
-
-            # Prepare headers
-            headers = self._prepare_headers(config)
-
-            # Prepare payload
-            payload = {
-                "message_id": message_id,
-                "status": "processing",
-                "processor": "chat-orchestrator",
-                "processor_version": settings.API_VERSION,
-                "timestamp": time.time()
-            }
-
-            logger.info("Notifying Platform of message processing",
-                       conversation_id=conversation_id,
-                       message_id=message_id,
-                       platform_name=config["name"])
-
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status in [200, 201]:
-                    data = await response.json()
-
-                    logger.info("Successfully notified Platform",
-                               conversation_id=conversation_id,
-                               message_id=message_id,
-                               platform_name=config["name"])
-
-                    return {
-                        "success": True,
-                        "conversation_id": conversation_id,
-                        "message_id": message_id,
-                        "notification_id": data.get("notification_id"),
-                        "platform_provider": config["name"]
-                    }
-
-                else:
-                    error_text = await response.text()
-                    logger.warning("Failed to notify Platform (non-critical)",
-                                 conversation_id=conversation_id,
-                                 message_id=message_id,
-                                 platform_name=config["name"],
-                                 status=response.status,
-                                 error=error_text)
-
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status}: {error_text}",
-                        "conversation_id": conversation_id,
-                        "message_id": message_id,
-                        "platform_provider": config["name"]
-                    }
-
-        except Exception as e:
-            logger.warning("Exception while notifying Platform (non-critical)",
-                          conversation_id=conversation_id,
-                          message_id=message_id,
-                          error=str(e))
-
-            return {
-                "success": False,
-                "error": str(e),
-                "conversation_id": conversation_id,
-                "message_id": message_id
-            }
-
-    async def get_bot_configuration(
-        self,
-        bot_id: str,
-        platform_config: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Get bot configuration from Platform service."""
-        try:
-            # Get Platform configuration
-            config = platform_config
-
-            # Check rate limiting
-            if not await self._check_rate_limit(config):
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded",
-                    "bot_id": bot_id,
-                    "config": {}
-                }
-
-            session = await self._get_session()
-
-            # Construct the URL for getting bot config
-            base_url = config["base_url"]
-            url = f"{base_url.rstrip('/')}/get-bot-config"
-
-            # Prepare headers
-            headers = self._prepare_headers(config)
-
-            logger.info("Fetching bot configuration from Platform",
-                       bot_id=bot_id,
-                       platform_name=config["name"],
-                       url=url)
-
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-
-                    logger.info("Successfully retrieved bot configuration",
-                               bot_id=bot_id,
-                               platform_name=config["name"])
-
-                    return {
-                        "success": True,
-                        "bot_id": bot_id,
-                        "config": data,
-                    }
-
-                else:
-                    error_text = await response.text()
-                    logger.error("Failed to get bot configuration",
-                               bot_id=bot_id,
-                               platform_name=config["name"],
-                               status=response.status,
-                               error=error_text)
-
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status}: {error_text}",
-                        "bot_id": bot_id,
-                        "config": {}
-                    }
-
-        except Exception as e:
-            logger.error("Exception while getting bot configuration",
-                        bot_id=bot_id,
-                        error=str(e))
-
-            return {
-                "success": False,
-                "error": str(e),
-                "bot_id": bot_id,
-                "config": {}
             }
 
     async def execute_platform_action(
@@ -525,159 +567,22 @@ class PlatformClient:
         ai_response: Dict[str, Any],
         ai_action: str,
     ) -> Dict[str, Any]:
-        """Execute a Platform action (e.g., NEED_SUPPORT, NEED_SALE)."""
+        """Execute a Platform action (e.g., CHAT, CREATE_ORDER, NOTIFY)."""
+        config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
+
+        # Check rate limiting
+        if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
+            return {
+                "success": False,
+                "error": "Rate limit exceeded",
+                "action_type": ai_action,
+                "conversation_id": conversation_id
+            }
+
         try:
-            # Get Platform configuration
-            config = platform_config
-
-            # Check rate limiting
-            if not await self._check_rate_limit(config):
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded",
-                    "action_type": ai_action,
-                    "conversation_id": conversation_id
-                }
-
-            session = await self._get_session()
-
-            # Construct the URL for action execution
-            url = f"{url.rstrip('/')}"
-
-            # Prepare headers
-            headers = self._prepare_headers(config)
-
-            if ai_action == "CHAT":
-                answer = ai_response.get("answer", [])
-                if isinstance(answer, list):
-                    answers = []
-                    for ans in answer:
-                        answers.append(str(ans))
-                else:
-                    answers = [str(answer)]
-
-                sub_answer = ai_response.get("sub_answer", [])
-                if isinstance(sub_answer, list):
-                    sub_answers = []
-                    for ans in sub_answer:
-                        sub_answers.append(str(ans))
-                else:
-                    sub_answers = [str(sub_answer)]
-
-                payload = {
-                    "conversation_id": conversation_id,
-                    "response": {
-                        "answers": answers,
-                        "images": ai_response.get("images", []),
-                        "sub_answers": sub_answers
-                    }
-                }
-
-            elif ai_action == "CREATE_ORDER":
-                chat_url = f"{config['base_url'].rstrip('/')}/send-message"
-                chat_ai_response = {
-                    "answer": ai_response.get("answer", []),
-                    "images": ai_response.get("images", []),
-                    "sub_answer": ai_response.get("sub_answer", [])
-                }
-
-                result = await self.execute_platform_action(
-                    platform_config=config,
-                    url=chat_url,
-                    method="POST",
-                    meta_data=meta_data,
-                    conversation_id=conversation_id,
-                    ai_response=chat_ai_response,
-                    ai_action="CHAT"
-                )
-
-                payload = {
-                    "conversation_id": conversation_id,
-                    "customer_info": {
-                        "name": ai_response.get("customer_info", {}).get("name", ""),
-                        "phone": ai_response.get("customer_info", {}).get("phone", ""),
-                        "weight": ai_response.get("customer_info", {}).get("weight", ""),
-                        "height": ai_response.get("customer_info", {}).get("height", ""),
-                        "full_address": ai_response.get("customer_info", {}).get("full_address", ""),
-                        "district_name": ai_response.get("customer_info", {}).get("district_name", ""),
-                        "province_name": ai_response.get("customer_info", {}).get("province_name", ""),
-                        "ward_name": ai_response.get("customer_info", {}).get("ward_name", "")
-                    },
-                    "products": [
-                        {
-                            "product_code": str(product.get("product_id", "0")),
-                            "product_id_mapping": int(product.get("product_id", "0")),
-                            "product_name": product.get("product_name", ""),
-                            "quantity": product.get("quantity", 0),
-                            "price": product.get("price", 0)
-                        }
-                        for product in ai_response.get("products", [])
-                    ],
-                    "shipping_fee": ai_response.get("shipping_fee", 0),
-                    "traffic_source": ai_response.get("traffic_source", ""),
-                    "note": ai_response.get("note", "")
-                }
-
-            elif ai_action == "NOTIFY":
-                payload = {
-                    "conversation_id": conversation_id,
-                    "phone": ai_response.get("phone", ""),
-                    "intent": ai_response.get("intent", "")
-                }
-
-            # TODO: Implement execute_map
-            # execute_map = {
-            #     "POST": session.post,
-            #     "GET": session.get,
-            #     "PUT": session.put,
-            #     "DELETE": session.delete
-            # }
-
-            logger.info("Executing Platform action",
-                       conversation_id=conversation_id,
-                       action_type=ai_action,
-                       platform_name=config["name"])
-
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status in [200, 201]:
-                    data = await response.json()
-
-                    print("======== PLATFORM PAYLOAD ===========")
-                    print(json.dumps(payload, indent=4))
-                    print("======== PLATFORM PAYLOAD ===========")
-
-                    print("======== PLATFORM RESPONSE ===========")
-                    print(json.dumps(data, indent=4))
-                    print("======== PLATFORM RESPONSE ===========")
-
-                    logger.info("Successfully executed Platform action",
-                               conversation_id=conversation_id,
-                               action_type=ai_action,
-                               platform_name=config["name"],
-                               action_id=data.get("action_id"))
-
-                    print("Done action: ", ai_action)
-
-                    return {
-                        "success": True,
-                        "conversation_id": conversation_id,
-                    }
-
-                else:
-                    error_text = await response.text()
-                    logger.error("Failed to execute Platform action",
-                               conversation_id=conversation_id,
-                               action_type=ai_action,
-                               platform_name=config["name"],
-                               status=response.status,
-                               error=error_text)
-
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status}: {error_text}",
-                        "conversation_id": conversation_id,
-                    }
-
+            return await self.action_executor.execute_action(
+                ai_action, config, conversation_id, ai_response, meta_data
+            )
         except Exception as e:
             logger.error("Exception while executing Platform action",
                         conversation_id=conversation_id,
@@ -692,24 +597,17 @@ class PlatformClient:
     async def health_check(self, platform_config: Dict[str, Any]) -> bool:
         """Check if Platform service is healthy."""
         try:
-            config = platform_config
+            config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
+            url = f"{config.base_url.rstrip('/')}/health"
 
-            # Create a simple health check endpoint
-            base_url = config["base_url"]
-            health_endpoint = f"{base_url.rstrip('/')}/health"
+            result = await self.http_client.make_request("GET", url, config)
+            is_healthy = result["success"]
 
-            session = await self._get_session()
-            headers = self._prepare_headers(config)
+            logger.debug("Platform health check",
+                       platform_name=config.name,
+                       healthy=is_healthy)
 
-            async with session.get(health_endpoint, headers=headers) as response:
-                is_healthy = response.status == 200
-
-                logger.debug("Platform health check",
-                           platform_name=config["name"],
-                           healthy=is_healthy)
-
-                return is_healthy
-
+            return is_healthy
         except Exception as e:
             logger.error("Platform health check failed",
                         platform_id=platform_config["id"],
@@ -731,22 +629,19 @@ class PlatformClient:
                         "rate_limit_per_minute": platform.rate_limit_per_minute,
                         "meta_data": platform.meta_data
                     }
-                    for platform in active_platforms
+                    for platform in active_platforms.data if active_platforms and active_platforms.data
                 ]
-
         except Exception as e:
             logger.error("Failed to list Platform configurations", error=str(e))
             return []
 
     def clear_cache(self):
         """Clear the Platform configuration cache."""
-        self._platform_configs_cache.clear()
-        logger.info("Platform configuration cache cleared")
+        self.config_manager.clear_cache()
 
     async def close(self):
         """Close the aiohttp session"""
-        if self.session and not self.session.closed:
-            await self.session.close()
+        await self.http_client.close()
 
 
 # Global instances

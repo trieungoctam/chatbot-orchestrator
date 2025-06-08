@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import structlog
+import logging
 
 from app.api.v1 import api_v1_router
 from app.core.settings import settings
@@ -10,7 +11,20 @@ from app.core.redis_client import _redis_conversation_state as redis_conversatio
 from app.services import _message_handler
 # from app.services.job_processor import job_processor
 
-# Setup structured logging
+# Tắt hoàn toàn SQLAlchemy logs
+logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy.dialects").setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy.orm").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("aioredis").setLevel(logging.WARNING)
+
+# Set root logger level based on settings
+root_logger = logging.getLogger()
+root_logger.setLevel(getattr(logging, settings.LOG_LEVEL.upper(), logging.WARNING))
+
+# Setup structured logging with minimal output
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
@@ -34,31 +48,23 @@ async def lifespan(app: FastAPI):
     # ========================================
     # 🚀 STARTUP
     # ========================================
-    logger.info("🚀 Starting Enhanced Chat Bot Backend...", version="2.0.0")
+    logger.info("🚀 Starting Chat Bot Backend...")
 
     try:
         # Initialize Redis connection
-        logger.info("📡 Connecting to Redis...")
         await redis_conversation_state.connect()
-        logger.info("✅ Redis connected successfully")
+        logger.info("✅ Redis connected")
 
         # Initialize PostgreSQL database
-        logger.info("🗄️ Initializing PostgreSQL database...")
         await init_db()
-        logger.info("✅ Database initialized successfully")
+        logger.info("✅ Database initialized")
 
         # Initialize MessageHandler and start background processing
-        logger.info("🤖 Initializing MessageHandler...")
         await _message_handler.initialize()
         await _message_handler.start_background_processing()
-        logger.info("✅ MessageHandler background processing started")
+        logger.info("✅ MessageHandler started")
 
-        # Initialize job processor
-        logger.info("🎉 Initializing job processor...")
-        # await job_processor.start()
-        # logger.info("✅ Job processor initialized successfully")
-
-        logger.info("🎉 Enhanced Chat Bot Backend started successfully!")
+        logger.info("🎉 Chat Bot Backend ready!")
 
     except Exception as e:
         logger.error("❌ Failed to start application", error=str(e))
@@ -69,31 +75,20 @@ async def lifespan(app: FastAPI):
     # ========================================
     # 🛑 SHUTDOWN
     # ========================================
-    logger.info("🛑 Shutting down Enhanced Chat Bot Backend...")
+    logger.info("🛑 Shutting down...")
 
     try:
         # Stop MessageHandler background processing
-        logger.info("🤖 Stopping MessageHandler background processing...")
         await _message_handler.stop_background_processing()
         await _message_handler.close()
-        logger.info("✅ MessageHandler stopped")
 
         # Close Redis connection
-        logger.info("📡 Disconnecting from Redis...")
         await redis_conversation_state.disconnect()
-        logger.info("✅ Redis disconnected")
 
         # Close database connections
-        logger.info("🗄️ Closing database connections...")
         await close_db()
-        logger.info("✅ Database connections closed")
 
-        # Close job processor
-        logger.info("🎉 Closing job processor...")
-        # await job_processor.stop()
-        # logger.info("✅ Job processor closed")
-
-        logger.info("👋 Enhanced Chat Bot Backend shutdown complete")
+        logger.info("👋 Shutdown complete")
 
     except Exception as e:
         logger.error("❌ Error during shutdown", error=str(e))

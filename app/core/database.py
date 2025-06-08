@@ -1,14 +1,18 @@
 import structlog
+import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 from app.core.settings import settings
 
 logger = structlog.get_logger(__name__)
 
+# Tắt hoàn toàn SQLAlchemy logging ở level engine
+logging.getLogger('sqlalchemy').setLevel(logging.ERROR)
+
 # Create async engine
 engine = create_async_engine(
     settings.database_url_computed,
-    echo=settings.DEBUG,
+    echo=False,
     poolclass=NullPool if settings.ENVIRONMENT == "testing" else None,
     pool_pre_ping=True,
     pool_recycle=3600,
@@ -39,13 +43,13 @@ async def init_db():
     """Initialize database tables"""
     from app.db.base import Base
 
-    logger.info("Creating database tables...")
+    # logger.info("Creating database tables...")  # Remove verbose log
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created successfully")
+    # logger.info("Database tables created successfully")  # Remove verbose log
 
 async def close_db():
     """Close database connections"""
-    logger.info("Closing database connections...")
+    # logger.info("Closing database connections...")  # Remove verbose log
     await engine.dispose()
-    logger.info("Database connections closed")
+    # logger.info("Database connections closed")  # Remove verbose log

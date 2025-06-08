@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # ========================================
     # 📊 LOGGING CONFIGURATION
     # ========================================
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "WARNING"
     LOG_JSON: bool = True
     LOG_FILE: Optional[str] = None
 
