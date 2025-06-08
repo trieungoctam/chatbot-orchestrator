@@ -861,19 +861,39 @@ curl http://localhost:8000/api/v1/status/handler
 ### Project Structure
 ```
 app/
-├── api/v1/
-│   └── chat_api.py         # Chat endpoints
-├── services/
-│   ├── __init__.py         # Service exports
-│   └── message_handler.py  # Core MessageHandler
-├── schemas/
-│   ├── request.py          # Request models
-│   └── response.py         # Response models
-├── core/
-│   ├── database.py         # Database configuration
-│   └── redis_client.py     # Redis client setup
-└── tests/
-    └── test_api_chat.py     # Comprehensive test suite
+├── 🎯 domain/                    # Core Business Logic (Independent)
+│   ├── entities/                 # Business entities
+│   ├── repositories/             # Repository interfaces
+│   ├── services/                 # Domain services
+│   └── value_objects/            # Value objects
+│
+├── 🔧 application/               # Application Logic (Use Cases)
+│   ├── use_cases/               # Business use cases
+│   ├── services/                # Application services
+│   ├── dtos/                    # Data Transfer Objects
+│   └── validators/              # Input validation
+│
+├── 🌐 presentation/             # External Interface
+│   ├── api/                     # REST API endpoints
+│   ├── middleware/              # Request/Response middleware
+│   ├── schemas/                 # API schemas (Pydantic)
+│   └── dependencies/            # FastAPI dependencies
+│
+├── 🗄️ infrastructure/           # External Concerns
+│   ├── database/                # Database implementation
+│   ├── cache/                   # Cache implementation
+│   ├── external/                # External services
+│   ├── security/                # Security implementation
+│   └── monitoring/              # Logging & metrics
+│
+├── ⚙️ config/                   # Configuration
+│   ├── settings.py              # Application settings
+│   └── dependencies.py          # DI container
+│
+└── 🧪 tests/                    # Testing
+    ├── unit/                    # Unit tests
+    ├── integration/             # Integration tests
+    └── fixtures/                # Test fixtures
 ```
 
 ### Key Classes

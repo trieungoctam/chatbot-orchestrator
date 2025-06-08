@@ -43,3 +43,6 @@ htmlcov/
 # Database
 *.db
 *.sqlite3
+
+# Env
+v1.env
