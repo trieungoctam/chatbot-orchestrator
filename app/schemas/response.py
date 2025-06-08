@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Dict, Any, Optional, List
+from typing import List, Optional, Dict, Any, Union
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from enum import Enum
 
@@ -252,7 +252,7 @@ class PancakeMessageResponse(BaseModel):
     # Additional fields for enhanced MessageHandler
     action: Optional[str] = Field(default=None, description="Action taken by the message handler")
     ai_job_id: Optional[str] = Field(default=None, description="AI processing job ID")
-    lock_id: Optional[str] = Field(default=None, description="Message lock ID")
+    lock_id: Optional[str] = Field(default=None, description="Message lock ID (converted to string)")
     consolidated_messages: Optional[int] = Field(default=None, description="Number of consolidated messages")
     bot_name: Optional[str] = Field(default=None, description="Name of the bot handling the message")
 
@@ -264,3 +264,22 @@ class PancakeMessageResponse(BaseModel):
 
     # New field for context chunking information
     context_limit: Optional[ContextLimitInfo] = Field(default=None, description="Information about context chunking limits and results")
+
+    @field_validator('lock_id', mode='before')
+    def validate_lock_id(cls, value):
+        if value is None:
+            return value
+        # Convert integer to string automatically
+        if isinstance(value, int):
+            if value < 0:
+                raise ValueError("lock_id must be a non-negative integer")
+            return str(value)
+        # If already string, validate it can be converted to int (optional validation)
+        if isinstance(value, str):
+            try:
+                int_val = int(value)
+                if int_val < 0:
+                    raise ValueError("lock_id must represent a non-negative integer")
+            except ValueError:
+                raise ValueError("lock_id string must be a valid integer")
+        return value
