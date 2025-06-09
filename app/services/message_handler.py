@@ -712,6 +712,10 @@ class BackgroundJobManager:
                        platform_id=platform_id)
 
             # Check for history updates
+            print("========== Platform Conversation ID ==========")
+            print(platform_conversation_id)
+            print("========== Conversation ID ==========")
+            print(conversation_id)
             latest_history = await platform_client.get_conversation_history(
                 conversation_id=platform_conversation_id,
                 platform_config=platform_config
