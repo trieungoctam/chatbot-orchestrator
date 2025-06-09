@@ -82,7 +82,7 @@ class LockData:
         hash_int = int.from_bytes(hash_obj.digest(), 'big')
 
         # Apply modulo with large prime (1e9+7) for good distribution
-        MOD = 1000000007
+        MOD = 10000007
         lock_id = (hash_int % MOD) + 1
 
         return lock_id
