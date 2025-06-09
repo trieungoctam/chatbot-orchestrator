@@ -712,6 +712,7 @@ class BackgroundJobManager:
                        platform_id=platform_id)
 
             # Check for history updates
+            print("================== Platform Conversation ID: ", platform_conversation_id)
             latest_history = await platform_client.get_conversation_history(
                 conversation_id=platform_conversation_id,
                 platform_config=platform_config
@@ -728,7 +729,7 @@ class BackgroundJobManager:
                 # Handle updated history
                 print("========== Cancel Job ==========")
                 print("========== New Job ==========")
-                await self._handle_history_update(job_id, conversation_id, new_history, latest_history)
+                await self._handle_history_update(job_id, conversation_id, platform_conversation_id, new_history, latest_history)
                 return
 
             # Here , save history to database
@@ -777,6 +778,7 @@ class BackgroundJobManager:
         self,
         job_id: str,
         conversation_id: str,
+        platform_conversation_id: str,
         new_history: str,
         latest_history: Dict[str, Any]
     ):
@@ -791,7 +793,7 @@ class BackgroundJobManager:
         # Trigger new message handling
         bot_config = await self.parent_handler.bot_config_service.get_bot_config(conversation_id)
         await self.parent_handler.handle_message_request(
-            conversation_id=conversation_id,
+            conversation_id=platform_conversation_id,
             bot_id=bot_config.get("bot_id"),
             history=new_history,
             resources=resources
@@ -1465,6 +1467,8 @@ class MessageHandler:
     ):
         """Save current history to database from platform actions context."""
         try:
+            print("================== Conversation ID: ", conversation_id)
+            print("================== Platform Conversation ID: ", platform_conversation_id)
             # Get current cached history
             current_history = await self.history_processor.get_cached_history(conversation_id)
 
