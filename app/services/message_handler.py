@@ -19,6 +19,7 @@ from app.crud.conversation_crud import ConversationCRUD
 from app.utils.common import history_parser
 from app.clients.core_ai_client import get_ai_service
 from app.clients.platform_client import PlatformClient, get_platform_client
+from app.schemas.request import UpdateConversationRequest
 
 logger = structlog.get_logger(__name__)
 
@@ -626,7 +627,7 @@ class BackgroundJobManager:
         conversation_id = payload.get("conversation_id")
         platform_conversation_id = payload.get("platform_conversation_id", "")
         platform_config = payload.get("platform_config", {})
-
+        history = payload.get("history", "")
         # First, update job status to completed
         await self._update_job_status(job_id, "completed", {
             "ai_response": ai_result.get("data", {}),
@@ -650,7 +651,7 @@ class BackgroundJobManager:
                    ai_action=ai_result.get("action", ""))
 
         await self._handle_platform_actions(job_id, conversation_id, platform_conversation_id,
-                                           platform_config, ai_result)
+                                           platform_config, ai_result, history)
 
     async def _handle_failed_ai_result(self, job_id: str, ai_result: Dict[str, Any]):
         """Handle failed AI processing result."""
@@ -691,7 +692,8 @@ class BackgroundJobManager:
         conversation_id: str,
         platform_conversation_id: str,
         platform_config: Dict[str, Any],
-        ai_result: Dict[str, Any]
+        ai_result: Dict[str, Any],
+        history: str
     ):
         """Handle platform actions after AI processing."""
         try:
@@ -716,16 +718,22 @@ class BackgroundJobManager:
             )
 
             new_history = latest_history.get("history", "")
-            old_history = await self.parent_handler._get_cached_history(conversation_id)
+            old_history = history
 
-            if len(new_history) > len(old_history):
+            # Handle None case for old_history and compare lengths safely
+            if old_history is None:
+                old_history = ""
+
+            if new_history != old_history:
                 # Handle updated history
+                print("========== Cancel Job ==========")
+                print("========== New Job ==========")
                 await self._handle_history_update(job_id, conversation_id, new_history, latest_history)
                 return
 
             # Here , save history to database
             try:
-                await self.parent_handler._save_history_to_database_from_platform(conversation_id)
+                await self.parent_handler._save_history_to_database_from_platform(conversation_id, platform_conversation_id, platform_config)
                 logger.info("History saved to database before platform action execution",
                            job_id=job_id,
                            conversation_id=conversation_id,
@@ -956,12 +964,13 @@ class HistoryProcessor:
             old_history = await self.get_cached_history(section_id)
             if not old_history:
                 old_history = await self._get_processed_history_from_db(section_id)
+                print("####### old_history from db", old_history)
 
             if old_history:
+                print("####### old_history", old_history)
                 new_history_part = self._cut_history_string(current_history, old_history)
-
-                if len(current_history) > len(old_history):
-                    await self.set_cached_history(section_id, current_history)
+                print("####### new_history_part", new_history_part)
+                await self.set_cached_history(section_id, current_history)
 
                 return new_history_part
             else:
@@ -1019,17 +1028,37 @@ class HistoryProcessor:
             return None
 
     def _cut_history_string(self, current_history: str, old_history: str) -> str:
-        """Cut old history from current history to get only new messages."""
+        """Cut old history from current history using suffix-prefix matching algorithm."""
         try:
-            if not old_history or old_history not in current_history:
+            if not old_history:
                 return current_history
 
-            old_end_position = current_history.find(old_history) + len(old_history)
-            new_part = current_history[old_end_position:].strip()
-            return new_part
+            # Case 1: Old history is completely contained in current history
+            if old_history in current_history:
+                old_end_position = current_history.find(old_history) + len(old_history)
+                new_part = current_history[old_end_position:]  # Don't strip here to preserve intentional spaces
+                return new_part
+
+            # Case 2: Find the longest prefix of current_history that matches a suffix of old_history
+            max_overlap_length = 0
+
+            # Check all possible prefixes of current_history
+            for i in range(1, len(current_history) + 1):
+                prefix = current_history[:i]  # First i characters of current_history
+
+                if old_history.endswith(prefix):
+                    max_overlap_length = len(prefix)
+
+            if max_overlap_length > 0:
+                # Cut the matching prefix from the beginning of current_history
+                new_part = current_history[max_overlap_length:]  # Don't strip to preserve spaces
+                return new_part
+
+            # Case 3: No overlap found, return entire current history
+            return current_history
 
         except Exception as e:
-            logger.warning("Failed to cut old history, returning all as new", error=str(e))
+            logger.warning("Failed to cut old history using suffix algorithm", error=str(e))
             return current_history
 
     def parse_history(self, history: str, conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1109,26 +1138,82 @@ class ConfigurationService:
                 platform_crud = PlatformCRUD(session)
 
                 if platform_id and platform_id != "default":
-                    platform = await platform_crud.get_by_id_with_actions(uuid.UUID(platform_id))
-                    if platform and platform.is_active:
-                        actions = [action.model_dump() for action in platform.actions] if platform.actions else []
-                        return {
-                            "id": str(platform.id),
-                            "platform_id": str(platform.id),
-                            "name": platform.name,
-                            "description": platform.description,
-                            "base_url": platform.base_url,
-                            "auth_required": platform.auth_required,
-                            "auth_token": platform.auth_token,
-                            "rate_limit_per_minute": platform.rate_limit_per_minute,
-                            "meta_data": platform.meta_data,
-                            "actions": actions
-                        }
+                    try:
+                        platform = await platform_crud.get_by_id_with_actions(uuid.UUID(platform_id))
+                        if platform and platform.is_active:
+                            # Handle actions safely - they might be Pydantic models or dicts
+                            actions = []
+                            if platform.actions:
+                                logger.debug("Processing platform actions",
+                                           platform_id=platform_id,
+                                           actions_count=len(platform.actions),
+                                           actions_type=type(platform.actions).__name__)
+
+                                for i, action in enumerate(platform.actions):
+                                    logger.debug("Processing action",
+                                               action_index=i,
+                                               action_type=type(action).__name__,
+                                               has_model_dump=hasattr(action, 'model_dump'),
+                                               is_dict=isinstance(action, dict))
+
+                                    try:
+                                        if hasattr(action, 'model_dump'):
+                                            # It's a Pydantic model
+                                            action_dict = action.model_dump()
+                                            actions.append(action_dict)
+                                            logger.debug("Successfully converted Pydantic model to dict", action_index=i)
+                                        elif isinstance(action, dict):
+                                            # It's already a dictionary
+                                            actions.append(action)
+                                            logger.debug("Used existing dictionary", action_index=i)
+                                        else:
+                                            # Convert to dict if possible
+                                            try:
+                                                action_dict = dict(action)
+                                                actions.append(action_dict)
+                                                logger.debug("Successfully converted object to dict", action_index=i)
+                                            except Exception as convert_error:
+                                                logger.warning("Unable to convert action to dict",
+                                                             action_index=i,
+                                                             action=str(action),
+                                                             error=str(convert_error))
+                                                actions.append({})
+                                    except Exception as action_error:
+                                        logger.error("Error processing action",
+                                                   action_index=i,
+                                                   action_type=type(action).__name__,
+                                                   error=str(action_error))
+                                        # Add empty dict to prevent index issues
+                                        actions.append({})
+
+                                logger.debug("Finished processing actions",
+                                           total_actions=len(actions),
+                                           platform_id=platform_id)
+
+                            return {
+                                "id": str(platform.id),
+                                "platform_id": str(platform.id),
+                                "name": platform.name,
+                                "description": platform.description,
+                                "base_url": platform.base_url,
+                                "auth_required": platform.auth_required,
+                                "auth_token": platform.auth_token,
+                                "rate_limit_per_minute": platform.rate_limit_per_minute,
+                                "meta_data": platform.meta_data,
+                                "actions": actions
+                            }
+                    except Exception as platform_retrieval_error:
+                        logger.error("Error retrieving platform from database",
+                                   platform_id=platform_id,
+                                   error=str(platform_retrieval_error))
+                        # Fall through to default config
 
                 return self._get_default_platform_config()
 
         except Exception as e:
-            logger.error("Error getting platform config", error=str(e))
+            logger.error("Error getting platform config",
+                       platform_id=platform_id,
+                       error=str(e))
             return self._get_default_platform_config()
 
     def _get_default_ai_config(self) -> Dict[str, Any]:
@@ -1238,7 +1323,7 @@ class MessageHandler:
 
             # Handle locking and job creation
             return await self._handle_locking_and_processing(
-                section_id, conversation_id, effective_history, parsed_messages,
+                section_id, conversation_id, effective_history, parsed_messages, history,
                 bot_config, ai_config, platform_config, resources
             )
 
@@ -1271,6 +1356,7 @@ class MessageHandler:
         conversation_id: str,
         effective_history: str,
         parsed_messages: List[Dict[str, Any]],
+        history: str,
         bot_config: Dict[str, Any],
         ai_config: Dict[str, Any],
         platform_config: Dict[str, Any],
@@ -1297,7 +1383,7 @@ class MessageHandler:
             return await self._start_ai_processing_flow(
                 section_id, conversation_id, lock_result,
                 bot_config, ai_config, platform_config,
-                parsed_messages, resources
+                parsed_messages, history, resources
             )
         else:
             return {
@@ -1327,6 +1413,7 @@ class MessageHandler:
         ai_config: Dict[str, Any],
         platform_config: Dict[str, Any],
         parsed_messages: List[Dict[str, Any]],
+        history: str,
         resources: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Start AI processing flow."""
@@ -1337,7 +1424,7 @@ class MessageHandler:
         ai_job_id = await self._start_ai_processing(
             section_id, conversation_id, lock_result["lock_data"],
             bot_config, ai_config, platform_config,
-            parsed_messages, resources
+            parsed_messages, history, resources
         )
 
         # Update lock with job ID
@@ -1370,14 +1457,106 @@ class MessageHandler:
         """Legacy method for backward compatibility."""
         return await self.history_processor.set_cached_history(conversation_id, history)
 
-    async def _save_history_to_database_from_platform(self, conversation_id: str):
+    async def _save_history_to_database_from_platform(
+        self,
+        conversation_id: str,
+        platform_conversation_id: str = None,
+        platform_config: Dict[str, Any] = None
+    ):
         """Save current history to database from platform actions context."""
         try:
             # Get current cached history
             current_history = await self.history_processor.get_cached_history(conversation_id)
 
+            if not current_history and platform_conversation_id and platform_config:
+                logger.info("No cached history found, attempting to fetch from platform",
+                           conversation_id=conversation_id,
+                           platform_conversation_id=platform_conversation_id)
+
+                # Try to get history from platform as fallback
+                try:
+                    # Get platform client and fetch history
+                    platform_client = get_platform_client()
+
+                    history_result = await platform_client.get_conversation_history(
+                        conversation_id=platform_conversation_id,
+                        platform_config=platform_config
+                    )
+                    print("========== History Result ==========")
+                    print(history_result)
+                    print("========== History Result ==========")
+                    if history_result.get("success"):
+                        if history_result.get("history"):  # History is present and not empty
+                            current_history = history_result["history"]
+                            logger.info("Successfully fetched history from platform as fallback",
+                                       conversation_id=conversation_id,
+                                       platform_conversation_id=platform_conversation_id,
+                                       history_length=len(current_history))
+
+                            # Cache the history for future use
+                            await self.history_processor.set_cached_history(conversation_id, current_history)
+                        else:  # History key exists but is empty
+                            logger.info("Platform returned empty history as fallback",
+                                       conversation_id=conversation_id,
+                                       platform_conversation_id=platform_conversation_id,
+                                       platform_result=history_result)
+                    else:
+                        logger.warning("Failed to fetch history from platform as fallback",
+                                     conversation_id=conversation_id,
+                                     platform_conversation_id=platform_conversation_id,
+                                     platform_result=history_result)
+
+                except Exception as platform_error:
+                    logger.warning("Error fetching history from platform as fallback",
+                                 conversation_id=conversation_id,
+                                 platform_conversation_id=platform_conversation_id,
+                                 error=str(platform_error))
+            elif not current_history:
+                logger.info("No cached history found, attempting to fetch from platform",
+                           conversation_id=conversation_id)
+
+                # Try to get history from platform as fallback without provided context
+                try:
+                    # Get bot config to find platform
+                    bot_config = await self.bot_config_service.get_bot_config(conversation_id)
+                    platform_config_fallback = await self.config_service.get_platform_config(bot_config.get("platform_id"))
+
+                    # Get platform conversation ID (assuming it's the same as conversation_id for now)
+                    platform_conversation_id_fallback = conversation_id
+
+                    # Get platform client and fetch history
+                    platform_client = get_platform_client()
+
+                    history_result = await platform_client.get_conversation_history(
+                        conversation_id=platform_conversation_id_fallback,
+                        platform_config=platform_config_fallback
+                    )
+
+                    if history_result.get("success"):
+                        if history_result.get("history"):  # History is present and not empty
+                            current_history = history_result["history"]
+                            logger.info("Successfully fetched history from platform as fallback (without context)",
+                                       conversation_id=conversation_id,
+                                       history_length=len(current_history))
+
+                            # Cache the history for future use
+                            await self.history_processor.set_cached_history(conversation_id, current_history)
+                        else:  # History key exists but is empty
+                            logger.info("Platform returned empty history as fallback (without context)",
+                                       conversation_id=conversation_id,
+                                       platform_result=history_result)
+                    else:
+                        logger.warning("Failed to fetch history from platform as fallback (without context)",
+                                     conversation_id=conversation_id,
+                                     platform_result=history_result)
+
+                except Exception as platform_error:
+                    logger.warning("Error fetching history from platform as fallback (without context)",
+                                 conversation_id=conversation_id,
+                                 error=str(platform_error))
+
             if not current_history:
-                logger.warning("No cached history found to save to database from platform context",
+                logger.warning("No history available to save to database (cached or platform)",
                              conversation_id=conversation_id)
                 return
 
@@ -1385,14 +1564,12 @@ class MessageHandler:
             async with async_session_factory() as session:
                 conversation_crud = ConversationCRUD(session)
 
-                # Update the conversation with current history
-                update_data = {
-                    "history": current_history
-                }
+                # Create proper update request object
+                update_request = UpdateConversationRequest(history=current_history)
 
                 updated = await conversation_crud.update(
                     uuid.UUID(conversation_id),
-                    update_data
+                    update_request
                 )
 
                 if updated:
@@ -1490,6 +1667,7 @@ class MessageHandler:
         ai_config: Dict[str, Any],
         platform_config: Dict[str, Any],
         messages: List[Dict[str, Any]],
+        history: str,
         resources: Optional[Dict[str, Any]]
     ) -> str:
         """Start background AI processing job."""
@@ -1502,6 +1680,7 @@ class MessageHandler:
             "ai_config": ai_config,
             "platform_config": platform_config,
             "resources": resources or {},
+            "history": history
         }
 
         ai_job_id = await self.background_job_manager.create_ai_processing_job(ai_job_payload)

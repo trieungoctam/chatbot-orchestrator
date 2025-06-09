@@ -46,6 +46,49 @@ class PlatformConfig:
             cached_at=time.time()
         )
 
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'PlatformConfig':
+        """Create PlatformConfig from dictionary, filtering out unexpected fields."""
+        # Define the expected fields for PlatformConfig
+        expected_fields = {
+            'id', 'name', 'base_url', 'rate_limit_per_minute',
+            'auth_token', 'meta_data', 'cached_at'
+        }
+
+        # Filter the dictionary to only include expected fields
+        filtered_config = {}
+
+        for field in expected_fields:
+            if field in config_dict:
+                filtered_config[field] = config_dict[field]
+            elif field == 'cached_at':
+                # Handle cached_at with possible underscore prefix
+                if '_cached_at' in config_dict:
+                    filtered_config[field] = config_dict['_cached_at']
+                else:
+                    filtered_config[field] = time.time()
+            elif field == 'auth_token':
+                # Provide default for optional auth_token
+                filtered_config[field] = None
+            elif field == 'meta_data':
+                # Provide default for meta_data
+                filtered_config[field] = {}
+
+        # Handle missing required fields with defaults or raise error
+        if 'id' not in filtered_config:
+            filtered_config['id'] = config_dict.get('platform_id', 'default')
+
+        if 'name' not in filtered_config:
+            filtered_config['name'] = config_dict.get('name', 'Unknown Platform')
+
+        if 'base_url' not in filtered_config:
+            filtered_config['base_url'] = config_dict.get('base_url', 'http://localhost:8000')
+
+        if 'rate_limit_per_minute' not in filtered_config:
+            filtered_config['rate_limit_per_minute'] = config_dict.get('rate_limit_per_minute', DEFAULT_RATE_LIMIT)
+
+        return cls(**filtered_config)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format."""
         return {
@@ -319,7 +362,7 @@ class PlatformActionExecutor:
         await self._handle_chat_action(config, conversation_id, chat_ai_response, meta_data)
 
         # Then create order
-        url = f"{config.base_url.rstrip('/')}/create-order"
+        url = f"{config.base_url.rstrip('/')}/create-nhanh-order"
 
         payload = {
             "conversation_id": conversation_id,
@@ -360,7 +403,7 @@ class PlatformActionExecutor:
         meta_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Handle NOTIFY action."""
-        url = f"{config.base_url.rstrip('/')}/notify"
+        url = f"{config.base_url.rstrip('/')}/notify-sale"
 
         payload = {
             "conversation_id": conversation_id,
@@ -440,24 +483,25 @@ class PlatformClient:
     async def get_conversation_history(
         self,
         conversation_id: str,
-        platform_config: Dict[str, Any],
-        limit: int = 20
+        platform_config: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Get conversation history from Platform service."""
-        config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
+        config = PlatformConfig.from_dict(platform_config)
 
-        # Check rate limiting
-        if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
-            return {
-                "success": False,
-                "error": "Rate limit exceeded",
-                "conversation_id": conversation_id,
-                "history": "",
-                "resources": {}
-            }
+        # # Check rate limiting
+        # if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
+        #     return {
+        #         "success": False,
+        #         "error": "Rate limit exceeded",
+        #         "conversation_id": conversation_id,
+        #         "history": "",
+        #         "resources": {}
+        #     }
 
         url = f"{config.base_url.rstrip('/')}/history-chat"
-        params = {"conversation_id": conversation_id}
+        params = {
+            "conversation_id": conversation_id
+        }
 
         logger.info("Fetching conversation history from Platform",
                    conversation_id=conversation_id,
@@ -468,10 +512,16 @@ class PlatformClient:
 
         if result["success"]:
             data = result["data"]
+
+            # Enhanced logging for debugging
             logger.info("Successfully retrieved conversation history",
                        conversation_id=conversation_id,
                        platform_name=config.name,
-                       message_count=len(data.get("messages", [])))
+                       message_count=len(data.get("messages", [])),
+                       has_history=bool(data.get("history")),
+                       history_length=len(data.get("history", "")),
+                       has_resources=bool(data.get("resources")),
+                       response_keys=list(data.keys()) if isinstance(data, dict) else "not_dict")
 
             return {
                 "success": True,
@@ -483,7 +533,8 @@ class PlatformClient:
             logger.error("Failed to get conversation history",
                        conversation_id=conversation_id,
                        platform_name=config.name,
-                       error=result["error"])
+                       error=result["error"],
+                       status_code=result.get("status", "unknown"))
 
             return {
                 "success": False,
@@ -501,7 +552,7 @@ class PlatformClient:
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Send bot response to Platform service."""
-        config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
+        config = PlatformConfig.from_dict(platform_config)
 
         # Check rate limiting
         if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
@@ -568,7 +619,7 @@ class PlatformClient:
         ai_action: str,
     ) -> Dict[str, Any]:
         """Execute a Platform action (e.g., CHAT, CREATE_ORDER, NOTIFY)."""
-        config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
+        config = PlatformConfig.from_dict(platform_config)
 
         # Check rate limiting
         if not self.rate_limiter.can_make_request(config.id, config.rate_limit_per_minute):
@@ -597,7 +648,7 @@ class PlatformClient:
     async def health_check(self, platform_config: Dict[str, Any]) -> bool:
         """Check if Platform service is healthy."""
         try:
-            config = PlatformConfig(**{k: v for k, v in platform_config.items() if k != "_cached_at"})
+            config = PlatformConfig.from_dict(platform_config)
             url = f"{config.base_url.rstrip('/')}/health"
 
             result = await self.http_client.make_request("GET", url, config)

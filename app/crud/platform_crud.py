@@ -124,7 +124,8 @@ class PlatformCRUD:
             platform = Platform(**data)
             self.db.add(platform)
             await self.db.commit()
-            await self.db.refresh(platform, options=[selectinload(Platform.actions)])
+            # await self.db.refresh(platform, options=[selectinload(Platform.actions)])
+            await self.db.refresh(platform)
 
             response_data = self._to_response(platform)
 
