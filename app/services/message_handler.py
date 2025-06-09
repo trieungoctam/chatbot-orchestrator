@@ -7,6 +7,8 @@ import json
 import time
 import uuid
 import re
+import hashlib
+import random
 
 from app.core.redis_client import get_redis_client
 from app.core.database import async_session_factory
@@ -70,8 +72,20 @@ class LockData:
 
     @classmethod
     def generate_lock_id(cls) -> int:
-        """Generate a new lock ID using current timestamp in milliseconds."""
-        return int(time.time() * 1000)
+        """Generate a new lock ID using hash-based approach with 1e9+7 for better distribution."""
+
+        # Create unique data combining timestamp, random, and process info for uniqueness
+        data = f"{time.time()}{random.randint(1, 1000000)}{id(cls)}"
+
+        # Create hash and convert to integer
+        hash_obj = hashlib.md5(data.encode())
+        hash_int = int.from_bytes(hash_obj.digest(), 'big')
+
+        # Apply modulo with large prime (1e9+7) for good distribution
+        MOD = 1000000007
+        lock_id = (hash_int % MOD) + 1
+
+        return lock_id
 
 
 @dataclass
