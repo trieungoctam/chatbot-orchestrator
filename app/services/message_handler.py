@@ -1482,10 +1482,8 @@ class MessageHandler:
                         conversation_id=platform_conversation_id,
                         platform_config=platform_config
                     )
-                    print("========== History Result ==========")
-                    print(history_result)
-                    print("========== History Result ==========")
-                    if history_result.get("success"):
+
+                    if history_result:
                         if history_result.get("history"):  # History is present and not empty
                             current_history = history_result["history"]
                             logger.info("Successfully fetched history from platform as fallback",
@@ -1522,7 +1520,7 @@ class MessageHandler:
                     platform_config_fallback = await self.config_service.get_platform_config(bot_config.get("platform_id"))
 
                     # Get platform conversation ID (assuming it's the same as conversation_id for now)
-                    platform_conversation_id_fallback = conversation_id
+                    platform_conversation_id_fallback = platform_conversation_id
 
                     # Get platform client and fetch history
                     platform_client = get_platform_client()
