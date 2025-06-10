@@ -75,16 +75,20 @@ class LockData:
     def generate_lock_id(cls) -> int:
         """Generate a new lock ID using hash-based approach with 1e9+7 for better distribution."""
 
-        # Create unique data combining timestamp, random, and process info for uniqueness
-        data = f"{time.time()}{random.randint(1, 1000000)}{id(cls)}"
+        # # Create unique data combining timestamp, random, and process info for uniqueness
+        # data = f"{time.time()}{random.randint(1, 1000000)}{id(cls)}"
 
-        # Create hash and convert to integer
-        hash_obj = hashlib.md5(data.encode())
-        hash_int = int.from_bytes(hash_obj.digest(), 'big')
+        # # Create hash and convert to integer
+        # hash_obj = hashlib.md5(data.encode())
+        # hash_int = int.from_bytes(hash_obj.digest(), 'big')
 
-        # Apply modulo with large prime (1e9+7) for good distribution
-        MOD = 10000007
-        lock_id = (hash_int % MOD) + 1
+        # # Apply modulo with large prime (1e9+7) for good distribution
+        # MOD = 10000007
+        # lock_id = (hash_int % MOD) + 1
+
+        # lock_id = int(time.time() * 1000)
+
+        lock_id = int(time.time())
 
         return lock_id
 
@@ -1090,11 +1094,12 @@ class HistoryProcessor:
 
             messages = []
             for msg in message_data:
-                messages.append({
-                    "role": "user" if msg["role"] == "user" else "assistant",
-                    "content": msg["content"],
-                    "timestamp": msg["timestamp"]
-                })
+                if msg["role"] == "user":
+                    messages.append({
+                        "role": "user" if msg["role"] == "user" else "assistant",
+                        "content": msg["content"],
+                        "timestamp": msg["timestamp"]
+                    })
 
             return messages
 
